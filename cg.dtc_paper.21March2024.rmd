@@ -1,0 +1,749 @@
+---
+title: "cg.dtc_paper.21March2024"
+author: "Helen"
+date: "2024-03-21"
+output: html_document
+---
+#Library
+```{r}
+library(dplyr) #for data cleaning
+library(gtsummary) #for tables
+library(ggplot2) #for graphs
+library(rstatix) #for t-testing
+library(gee) #gee models
+library(sandwich) #sandwich estimator
+library(lmtest) #coeftest
+library(ggpubr) #signif stars
+```
+
+#Files
+```{r}
+svy <- read.csv("~/Caregiving Data/cg.svy_18April2024.csv", stringsAsFactors = FALSE)
+master <- read.csv("~/Caregiving Data/Master/cg.master_updated_10May2024.csv")
+```
+
+
+#Data Cleaning
+```{r}
+#adding famid
+svy <- svy %>%
+  mutate(famid = substr(studyid, 1, 3))
+
+#adding dichotomous drink to cope var
+alch_var <- c("bc4", "bc11")
+svy$dtc <- NA
+
+svy[, alch_var[1]] <- ifelse(is.na(svy[, alch_var[1]]), -1, svy[, alch_var[1]]) #set to -1 if NA
+svy[, alch_var[2]] <- ifelse(is.na(svy[, alch_var[2]]), -1, svy[, alch_var[2]]) #set to -1 if NA
+
+svy$dtc <- NA
+
+for (i in 1:nrow(svy)) {
+  if (svy[i, alch_var[1]] > 0 | svy[i, alch_var[2]] > 0) {
+    svy$dtc[i] <- 1
+  } else if (svy[i, alch_var[1]] == -1 & svy[i, alch_var[2]] == -1) {
+    svy$dtc[i] <- 2
+  } else {
+    svy$dtc[i] <- 0
+  }
+}
+
+svy$dtc <- ifelse(svy$dtc == 2, NA, svy$dtc)
+svy$dtc <- as.factor(svy$dtc)
+
+#calcualtes network size
+
+ns_add <- master %>%
+  subset(NQ2 == TRUE) %>%
+  subset(nchar(C_Convoy_NQ2) > 0) %>% #gets people only in Caregiver's Network
+  group_by(StudyID) %>%
+  mutate(network.size = n()) %>%
+  select(StudyID, network.size) %>%
+  unique()
+
+#aggregating nq2
+nq2 <- master %>%
+  subset(NQ2 == TRUE) %>%
+  subset(nchar(C_Convoy_NQ2) > 0) %>% 
+  select(StudyID, contains("NQ2")) %>%
+  rename_with(~ gsub("[_]NQ2$", "", .x))
+
+for (row in 1:nrow(nq2)) {
+  for (col in c(4:46, 48)) {
+    cell <- nq2[row, col]
+    if (is.na(cell) | cell == "1" | cell == "0") {
+      next
+    } else if (cell == "") {
+      nq2[row, col] <- NA
+    } else {
+     nq2[row, col] <- "1"
+    }
+  }
+}
+
+nq2[,4:48] <- sapply(nq2[,4:48], as.numeric) #turns into numeric
+nq2_agg <- nq2[, c(1, 4:48)]
+
+#malfeasance, nonfeasance, and uplift
+malf_col <- c("q8", "q11", "q12", "q15", "q16", "q17", "q5")
+nonf_col <- c("q3", "q10", "q14", "q36")
+uplift_col <- c("q2", "q6", "q7", "q9", "q13", "q18", "q19", "q35")
+
+nq2_agg <- nq2_agg %>%
+mutate(malf_score = select(., all_of(malf_col)) %>% rowSums(na.rm = TRUE),
+         nonf_score = select(., all_of(nonf_col)) %>% rowSums(na.rm = TRUE),
+         uplift_score = select(., all_of(uplift_col)) %>% rowSums(na.rm = TRUE))
+
+table(nq2_agg$malf_score)
+summary(nq2_agg$malf_score) #median = 0
+
+nq2_agg$malf <- ifelse(nq2_agg$malf_score > 0, 1, 0) #1 = high malf, 0 = low malf
+
+
+table(nq2_agg$nonf_score)
+summary(nq2_agg$nonf_score) #1 = high nonf, 0 = low nonf
+
+nq2_agg$nonf <- ifelse(nq2_agg$nonf_score > 0, 1, 0)
+
+
+table(nq2_agg$uplift_score)
+summary(nq2_agg$uplift_score) #median = 1
+
+nq2_agg$uplift <- ifelse(nq2_agg$uplift_score > 1, 1, 0)  #1 = high uplift, 0 = low uplift
+
+
+#gets sum of all
+nq2_df <- aggregate(nq2_agg[,c(2:44, 46, 50:52)], by = list(nq2_agg$StudyID), sum, na.rm = TRUE)
+colnames(nq2_df)[1] <- "StudyID"
+
+q44_add <- aggregate(nq2_agg[,c(45)], by = list(nq2_agg$StudyID), mean, na.rm = TRUE)
+colnames(q44_add) <- c("StudyID", "q44")
+q44_add$q44 <- ifelse(is.nan(q44_add$q44), NA, q44_add$q44)
+nq2_sum <- merge(nq2_df, q44_add, by = "StudyID")
+
+#combining ns with nq2
+add_var <- merge(ns_add, nq2_sum, by = "StudyID", all = TRUE)
+
+add_var <- add_var %>%
+  select(StudyID, malf, nonf, uplift, q44, network.size)
+colnames(add_var)[5] <- "support_satisf"
+
+#measure col
+cgd_col <- svy %>%
+  select(contains("cgd")) %>%
+  colnames()
+
+padl_col  <- svy %>%
+  select(contains("padl")) %>%
+  colnames()
+
+stress_col <- svy %>%
+  select(contains("cgps")) %>%
+  colnames()
+
+depression_col <- svy %>%
+  select(contains("cesd")) %>%
+  colnames()
+
+pac_col <- colnames(svy)[89:97]
+sf12_col <- colnames(svy)[288:299] 
+
+#reverse coding
+svy$cesd3 <- recode(svy$cesd3, '0' = 3, '1' = 2, '2' = 1, '3' = 0)
+svy$cesd7 <- recode(svy$cesd7, '0' = 3, '1' = 2, '2' = 1, '3' = 0)
+
+svy$bs2 <- recode(svy$bs2, '0' = 5, '1' = 4, '2' = 3,  '3' = 2, '4' = 1, '5' = 0)
+svy$bs4 <- recode(svy$bs4, '0' = 5, '1' = 4, '2' = 3,  '3' = 2, '4' = 1, '5' = 0)
+svy$bs6 <- recode(svy$bs6, '0' = 5, '1' = 4, '2' = 3,  '3' = 2, '4' = 1, '5' = 0)
+
+for (i in 1:length(padl_col)) {
+  col <- padl_col[i]
+  svy[,col] <- ifelse(svy[,col] == 98, NA, svy[,col])
+}
+
+svy$cgps4 <- recode(svy$cgps4, '0' =  4, '1' = 3, '2' = 2, '3' = 1,  '4' = 0)
+svy$cgps5 <- recode(svy$cgps5, '0' =  4, '1' = 3, '2' = 2, '3' = 1,  '4' = 0)
+svy$cgps7 <- recode(svy$cgps7, '0' =  4, '1' = 3, '2' = 2, '3' = 1,  '4' = 0)
+svy$cgps8 <- recode(svy$cgps8, '0' =  4, '1' = 3, '2' = 2, '3' = 1,  '4' = 0)
+
+#caregiving context
+svy$rare.disease <- NA
+
+for (i in 1:nrow(svy)) {
+  fam <- as.integer(svy[i,]$famid)
+  if (fam >= 200 & fam < 300) {
+    svy[i,]$rare.disease <- 0
+  } else {
+    svy[i,]$rare.disease <- 1
+  }
+} # 0 = healthy, 1 = rare disease
+
+svy$rare.disease <- as.factor(svy$rare.disease) 
+
+#race
+svy <- svy %>% 
+  mutate(across(race, ~replace(.,. == "", NA)))
+
+svy$race <- ifelse(svy$race == "White", 1, 0) #1 = white, 0 = POC
+svy$race <- as.factor(svy$race)
+
+#gender
+svy$gender <- as.factor(svy$gender) #0 = men, 1 = women
+
+#marstat
+svy <- svy %>% 
+  mutate(across(marstat, ~replace(.,. == "", NA)))
+svy$marstat <- ifelse(svy$marstat == "Married / Living as Married", 1, 0) # 1= married, 0 = not married
+svy$marstat <- as.factor(svy$marstat)
+
+#educate
+svy <- svy %>% 
+  mutate(across(educate, ~replace(.,. == "", NA)))
+svy$educate <- ifelse(svy$educate == "Post-Graduate Degree" | svy$educate == "Bachelor’s Degree", 1, 0)
+svy$educate <- as.factor(svy$educate) #1 = bachelors and above, 0 = below bachelors
+
+#empstat
+svy <- svy %>% 
+  mutate(across(empstat, ~replace(.,. == "", NA)))
+
+svy$empstat <- ifelse(svy$empstat == "Not employed (including student or homemaker)" | svy$empstat == "Retired", 0, 1) #0 = not employed, 1 = employed
+
+svy$empstat <- as.factor(svy$empstat)
+
+#hhinc
+svy <- svy %>% 
+  mutate(across(hhinc, ~replace(.,. == "", NA)))
+svy$hhinc <- ifelse(svy$hhinc == "Don’t know", NA, svy$hhinc)
+svy$hhinc <- factor(svy$hhinc, levels = c( "$20,000 or less", 
+                                         "$20,001 to $35,000", 
+                                         "$35,001 to $50,000", 
+                                         "$50,001 to $75,000",
+                                         "$75,001 to $100,000", 
+                                         "$100,001 to 125,000", 
+                                         "$125,001 to 150,000", 
+                                         "$150,001 to 200,000",
+                                         "Greater than $200,000"))
+
+svy$hhinc <- ifelse(svy$hhinc == "$20,000 or less" | 
+                     svy$hhinc == "$20,001 to $35,000" | 
+                     svy$hhinc == "$35,001 to $50,000", 0, 1) 
+#0 = "Low Income (<= $50,000)", 1 = "High Income (> $50,000)"
+svy$hhinc <- as.factor(svy$hhinc)
+
+#proportions
+add_var <- add_var %>%
+  mutate(malf_prop = malf/network.size,
+         nonf_prop = nonf/network.size,
+         uplift_prop = uplift/network.size)
+
+add_var <- add_var %>%
+  select(StudyID, malf_prop, nonf_prop, uplift_prop, support_satisf, network.size)
+
+#Rare Disease Specifics
+svy$fam_sub <- substr(svy$famid, 1, 1)
+svy$disease_cx <- NA
+
+for (i in 1:nrow(svy)) {
+  if (svy$fam_sub[i] == 1 | svy$fam_sub[i] == 7) {
+    svy$disease_cx[i] <- "IEM"
+  } else if (svy$fam_sub[i] == 4 | svy$fam_sub[i] == 8) {
+    svy$disease_cx[i] <- "UDP"
+  } else {
+    svy$disease_cx[i] <- "HV"
+  }
+}
+
+table(svy$disease_cx) 
+
+svy_sel <- svy %>%
+  select(StudyID = studyid, famid, dtc, rare.disease, disease_cx, sf12_physical = sf12physical, sf12_mental = sf12mental, cesd_mean, padl_mean, stress_mean = cgps_mean, pac_mean, cgd_mean, race, gender, marstat, educate, empstat, age, cr_age_cln, alc_freq, alc_drinks, smoking, ever_smoked, anyone_smoke, caffeine, all_of(depression_col), all_of(sf12_col), all_of(padl_col), all_of(stress_col), all_of(pac_col), all_of(cgd_col))
+
+#combine svy w network data
+
+df <- merge(svy_sel, add_var, by = "StudyID")
+
+#aggregate by disease
+cr_by_disease <- aggregate(df$famid, 
+          by = list(df$disease_cx), 
+          FUN = function(x) length(unique(x))) #number of care recipients by disease category
+colnames(cr_by_disease) <- c("Group", "n")
+
+cg_by_disease <- aggregate(df$StudyID, 
+          by = list(df$disease_cx), 
+          FUN = function(x) length(unique(x))) #number of caregivers by disease category
+colnames(cg_by_disease) <- c("Group", "n")
+
+cg_per_fam <- df %>%
+  group_by(famid, disease_cx) %>% 
+  count() #creates a dataset of # of caregivers per family
+
+cg_per_fam <- cg_per_fam %>%
+  mutate(single_participant = ifelse(n > 1, 0, 1)) #indicates whether theres one participant or more in each family
+
+disease_part <- aggregate(cg_per_fam$single_participant, 
+          by = list(cg_per_fam$disease_cx), 
+          table) #creates table of single vs multiple participants per disease category
+disease_part <- data.frame(Group = disease_part$Group.1,
+                   Multiple_Participants = as.data.frame(disease_part$x)[,1],
+                   Single_Participants = as.data.frame(disease_part$x)[,2])
+
+#support satisfaction
+df$ssatisf_dich <- ifelse(df$support_satisf > 3, 1, 0)
+df$ssatisf_dich <- ifelse(is.na(df$support_satisf), 0, df$ssatisf_dich)
+df$ssatisf_dich <- as.factor(df$ssatisf_dich)
+
+df$ssatisf_missing <- ifelse(is.na(df$support_satisf), 1, 0)
+df$ssatisf_missing <- as.factor(df$ssatisf_missing)
+```
+
+#Alch Correlations
+
+```{r}
+drinking <- df %>% select(dtc, alc_freq, alc_drinks, smoking, ever_smoked, caffeine)
+
+Hmisc::rcorr(as.matrix(drinking))
+
+cor(svy$bc4, svy$bc11)
+```
+
+#Alcohol Behavior
+```{r}
+#Yearly Number
+df$alc_freq_recoded <- recode(df$alc_freq, '0' = 0, '1' = 0, 
+                              '2' = 2, '3' = 11, '4' = 12, '5' = 36, 
+                              '6' = 48, '7' = 96, '8' = 192, '9' = 288,
+                              '10' = 365)
+df$alc_drinks_recoded <- recode(df$alc_drinks, '0' = 0, '1' = 0, 
+                                '2' = 1, '3' = 2, '4' = 4, '5' = 6,
+                                '6' = 8, '7' = 11, '8' = 15, '9' = 18,
+                                '10' = 24, '11' = 25)
+df <- df %>%
+  mutate(year_drinks = alc_freq_recoded*alc_drinks_recoded,
+         month_drinks = round(year_drinks/12, 2),
+         week_drinks = round(month_drinks/4, 2))
+#https://www.cdc.gov/nchs/nhis/alcohol/alcohol_glossary.htm
+
+df$drinker_type <- NA
+
+for (i in 1:nrow(df)) {
+  if (is.na(df$week_drinks[i])) {
+    df$drinker_type[i] <- NA
+  } else if (is.na(df$gender[i]) & df$week_drinks[i] > 3) {
+    df$drinker_type[i] <- NA
+  } else if (df$week_drinks[i] == 0) {
+    df$drinker_type[i] <- "Non-Drinker"
+  } else if (df$week_drinks[i] <= 3 & df$week_drinks[i] != 0) {
+    df$drinker_type[i] <- "Light"
+  } else if (df$gender[i] == 1 & df$week_drinks[i] > 3 & df$week_drinks[i] <= 7) {
+    df$drinker_type[i] <- "Moderate"
+  } else if (df$gender[i] == 0 & df$week_drinks[i] > 3 & df$week_drinks[i] <= 14) {
+    df$drinker_type[i] <- "Moderate"
+  } else if (df$gender[i] == 1 & df$week_drinks[i] > 7) {
+    df$drinker_type[i] <- "Heavy"
+  } else if (df$gender[i] == 0 & df$week_drinks[i] > 14) {
+    df$drinker_type[i] <- "Heavy"
+  }
+}
+
+table(df$drinker_type) #mutual exclusive, 2 NAs
+df$drinker_type <- factor(df$drinker_type, levels = c("Non-Drinker", "Light", "Moderate", "Heavy"))
+```
+
+#Cronbach Alpha
+```{r}
+df %>%
+  select(all_of(depression_col[-length(depression_col)])) %>%
+  ltm::cronbach.alpha(na.rm = TRUE, CI = TRUE)
+
+df %>%
+  select(all_of(stress_col[-length(stress_col)])) %>%
+  ltm::cronbach.alpha(na.rm = TRUE, CI = TRUE)
+
+df %>%
+  select(all_of(cgd_col[-length(cgd_col)])) %>%
+  ltm::cronbach.alpha(na.rm = TRUE, CI = TRUE)
+```
+
+#Function
+```{r}
+confint_fx <- function(object, parm, level = 0.95, ...) {
+    cc <- coef(summary(object))
+    mult <- qnorm((1+level)/2)
+    citab <- with(as.data.frame(cc),
+                  cbind(lwr=Estimate-mult*`Robust S.E.`,
+                        upr=Estimate+mult*`Robust S.E.`))
+    rownames(citab) <- rownames(cc)
+    citab[parm,]
+} #adds CI to GEE
+```
+
+
+#DTC on Health - Sandwich Estimator
+```{r}
+#cesd
+mod1 <- lm(cesd_mean ~ dtc + race +gender + marstat + educate + empstat + age + drinker_type,
+           data = df)
+m1 <- coeftest(mod1, vcov=sandwich)
+
+# cesd_df <- effects::effect(term = "dtc", mod = mod1, vcov=sandwich) %>% as.data.frame()
+# cesd_df$Measure <- "CESD"
+
+#stress
+mod2 <- lm(stress_mean ~ dtc  +  race + gender + marstat + educate + empstat + age + drinker_type,
+           data = df)
+m2 <- coeftest(mod2, vcov=sandwich)
+
+# stress_df <- effects::effect(term = "dtc", mod = mod2, vcov=sandwich) %>% as.data.frame()
+# stress_df$Measure <- "Percieved Stress"
+
+
+#sf12 - mental
+mod3 <- lm(sf12_mental ~ dtc  +  race + gender + marstat + educate + empstat + age + drinker_type,
+           data = df)
+m3 <- coeftest(mod3, vcov=sandwich)
+
+# sf12m_df <- effects::effect(term = "dtc", mod = mod3, vcov=sandwich) %>% as.data.frame()
+# sf12m_df$Measure <- "SF12 - Mental"
+
+
+#sf12 - physical
+mod4 <- lm(sf12_physical ~ dtc + race  + gender + marstat + educate + empstat + age + drinker_type,
+           data = df)
+m4 <- coeftest(mod4, vcov=sandwich)
+# sf12p_df <- effects::effect(term = "dtc", mod = mod4, vcov=sandwich) %>% as.data.frame()
+# sf12p_df$Measure <- "SF12 -  Physical"
+
+#plot
+# health_df <- rbind(cesd_df, 
+#                    rbind(stress_df, 
+#                          rbind(sf12m_df, sf12p_df)))
+# health_df$dtc <- ifelse(health_df$dtc == "1", "Yes", "No")
+# health_df$dtc <- as.factor(health_df$dtc)
+# 
+# stat.test <- data.frame(Measure = c("CESD", "Percieved Stress", "SF12 - Mental", "SF12 -  Physical"),
+#                         .y. = c("fit", "fit", "fit", "fit"),
+#                         group1 = c("No", "No", "No", "No"),
+#                         group2 = c("Yes", "Yes","Yes", "Yes" ),
+#                         p.adj.signif = c("***", "***", "***", "*"), 
+#                         y.position  = c(1.05, 2.25, 74, 89),
+#                         xmin = c(1, 1, 1, 1), 
+#                         xmax = c(2, 2, 2, 2)) 
+
+# health_df %>%
+#   ggplot(aes(x = dtc, y = fit)) +
+#   geom_col(aes(fill = dtc), alpha = 0.7) +
+#   facet_wrap(. ~ Measure, scales = "free_y",
+#              nrow = 1) +
+#   labs(x = "Drinking to Cope", y = "Mean", title = "Drinking to Cope on Caregiver Wellbeing") +
+#   theme_bw() +
+#   geom_errorbar(aes(ymin = fit - se, ymax = fit + se), width = 0.1) +
+#   guides(fill=guide_legend(title="Drinking to Cope")) +
+#   theme(axis.title.x = element_text(face = "bold"),
+#         axis.title.y = element_text(face = "bold"),
+#         axis.text.x = element_blank(),
+#         axis.ticks.x = element_blank(),
+#         plot.title = element_text(hjust = 0.5, face = "bold"),
+#         strip.text.x = element_text(color = "white", face = "bold"),
+#         strip.background = element_rect(fill= "black"),
+#         legend.position = "bottom") +
+#   ggsci::scale_fill_npg() +
+#   ggpubr::stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.01)
+```
+#Health Models
+```{r}
+stargazer::stargazer(m1, m2, m3, m4,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.caption = "Health",
+                     column.labels=c('cesd', 'stress', 'sf12mental', 'sf12physical'),
+                     intercept.bottom = FALSE
+                     )
+```
+
+#Demographics
+```{r}
+demo <- df %>% select(dtc, gender, race, marstat, educate, empstat, age, cr_age_cln)
+demo$dtc <- ifelse(demo$dtc == 1, "Yes", "No")
+
+demo %>%
+  tbl_summary(
+            by = dtc,
+            type = list(age ~ "continuous",
+                        cr_age_cln ~ "continuous"),
+            statistic = list(
+      all_continuous() ~ "{mean} ({sd})")) %>%
+  add_n() %>%
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits = 2)) %>%
+  modify_header(label ~ "**Variable**") %>% 
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Drinking to Cope**") %>% 
+  modify_caption("**Demographics**") %>% 
+  add_significance_stars() #THIS IS A TABLE
+```
+#Models
+```{r}
+#demographics
+fitDemo <- glm(dtc ~ race + gender + marstat + educate + empstat + age + drinker_type,
+    family = binomial(link = "logit"),
+    data = df)
+
+fitDemo_results <- coeftest(fitDemo, vcov=sandwich)
+
+#support satisfaction
+
+fitSS <- glm(dtc ~ ssatisf_dich + ssatisf_missing + race + gender + marstat + educate + empstat + age  + drinker_type,
+    family = binomial(link = "logit"),
+    data = df)
+
+fitSS_results <- coeftest(fitSS, vcov=sandwich)
+
+#caregiving 
+fitCG <- glm(dtc ~ rare.disease  + cgd_mean + race + gender + marstat + educate + empstat + age  + drinker_type,
+    family = binomial(link = "logit"),
+    data = df)
+fitCG_results <- coeftest(fitCG, vcov=sandwich)
+
+#network
+fitNet <- glm(dtc ~ network.size + malf_prop + uplift_prop + nonf_prop +
+               race + gender + marstat + educate + empstat + age+ drinker_type,
+              family = binomial(link = "logit"),
+              data = df)
+
+fitNet_results <- coeftest(fitNet, vcov=sandwich)
+
+#summary
+stargazer::stargazer(fitDemo_results, fitCG_results, fitNet_results, fitSS_results, 
+                     title = "Factors Associated with Drinking to Cope", 
+                     type = "text", digits = 3,  
+                     column.labels =  c("Demographics",  
+                                        "Caregiving", "Network", "Satisfaction"),
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.caption = "Drinking to Cope",
+                     dep.var.labels.include = FALSE,
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F
+                     ) ##THIS IS ONE TABLE
+
+```
+
+#Creating DF for Missing Analysis
+```{r}
+#imputed,
+df_impute <- df
+
+df_impute$dtc_missing <- ifelse(is.na(df_impute$dtc), 1, 0)
+df_impute$dtc[is.na(df_impute$dtc)] <- round(mean(as.numeric(as.character(df_impute$dtc)), na.rm = TRUE)) 
+df_impute$dtc_missing <- as.factor(df_impute$dtc_missing)
+
+#original, n= 367
+```
+
+#Missing - Demographics
+```{r}
+#Demographics
+
+mod2a <- glm(dtc ~ race + gender + marstat + educate + age + drinker_type,
+               family = binomial(link = "logit"),
+               data = df_impute)
+
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- glm(dtc ~ race + gender + marstat + educate + age + drinker_type + rare.disease + empstat,
+               family = binomial(link = "logit"),
+               data = df_impute)
+
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+#comparing models
+mods <- list(fitDemo_results, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.caption = "Drinking to Cope",
+                     dep.var.labels.include = FALSE,
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F
+                     )
+```
+
+#Missing - Support Satisfaction
+```{r}
+mod2a <- glm(dtc ~ ssatisf_dich + ssatisf_missing + race + gender + marstat + educate + age  + drinker_type,
+             family = binomial(link = "logit"),
+             data = df_impute)
+
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- glm(dtc ~ ssatisf_dich + ssatisf_missing + race + gender + marstat + educate + age  + drinker_type + rare.disease + empstat,
+             family = binomial(link = "logit"),
+             data = df_impute)
+
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+#comparing models
+mods <- list(fitSS_results, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.caption = "Drinking to Cope",
+                     dep.var.labels.include = FALSE,
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F
+                     )
+```
+
+#Missing - Caregiving
+```{r}
+mod2a <- glm(dtc ~ rare.disease  + cgd_mean + race + gender + marstat + educate  + age  + drinker_type,
+             family = binomial(link = "logit"),
+             data = df_impute)
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- glm(dtc ~ rare.disease  + cgd_mean + race + gender + marstat + educate  + age  + drinker_type + rare.disease + empstat,
+             family = binomial(link = "logit"),
+             data = df_impute)
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+#comparing models
+mods <- list(fitCG_results, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.caption = "Drinking to Cope",
+                     dep.var.labels.include = FALSE,
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F
+                     )
+```
+
+#Missing - Network
+```{r}
+mod2a <- glm(dtc ~ network.size + malf_prop + uplift_prop + nonf_prop +
+                race + gender + marstat + educate + age + drinker_type,
+              family = binomial(link = "logit"),
+              data = df_impute)
+
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- glm(dtc ~ network.size + malf_prop + uplift_prop + nonf_prop +
+                race + gender + marstat + educate + age + drinker_type + rare.disease + empstat,
+              family = binomial(link = "logit"),
+              data = df_impute)
+
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+
+#comparing models
+mods <- list(fitNet_results, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.caption = "Drinking to Cope",
+                     dep.var.labels.include = FALSE,
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F
+                     )
+```
+#CESD
+```{r}
+mod2a <- lm(cesd_mean ~ dtc + race +gender + marstat + educate + age + drinker_type,
+           data = df_impute)
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- lm(cesd_mean ~ dtc + race +gender + marstat + educate + empstat + age + drinker_type + rare.disease + empstat,
+           data = df_impute)
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+#comparing models
+mods <- list(m1, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001)
+                     )
+```
+
+#Percieved Stress
+```{r}
+mod2a <- lm(stress_mean ~ dtc + race +gender + marstat + educate + age + drinker_type,
+           data = df_impute)
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- lm(stress_mean ~ dtc + race +gender + marstat + educate + empstat + age + drinker_type + rare.disease + empstat,
+           data = df_impute)
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+#comparing models
+mods <- list(m2, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001)
+                     )
+```
+
+#SF-12 Mental
+```{r}
+mod2a <- lm(sf12_mental ~ dtc + race +gender + marstat + educate + age + drinker_type,
+           data = df_impute)
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- lm(sf12_mental ~ dtc + race +gender + marstat + educate + empstat + age + drinker_type + rare.disease + empstat,
+           data = df_impute)
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+#comparing models
+mods <- list(m3, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001)
+                     )
+```
+
+#SF-12 Physical
+```{r}
+mod2a <- lm(sf12_physical ~ dtc + race +gender + marstat + educate + age + drinker_type,
+           data = df_impute)
+mod2a <- coeftest(mod2a, vcov=sandwich)
+
+mod2b <- lm(sf12_physical ~ dtc + race +gender + marstat + educate + empstat + age + drinker_type + rare.disease + empstat,
+           data = df_impute)
+mod2b <- coeftest(mod2b, vcov=sandwich)
+
+#comparing models
+mods <- list(m4, mod2a, mod2b)
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001)
+                     )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
