@@ -1,0 +1,531 @@
+---
+title: "Dyad Model Analysis"
+author: "Helen"
+date: '2022-08-31'
+output: html_document
+---
+Library
+
+```{r}
+library(lmtest)
+library(sandwich)
+library(stargazer)
+library(modelsummary)
+library(Hmisc)
+library(sjPlot)
+library(effects)
+library(interactions)
+library(cowplot)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+```
+
+Modeling
+
+```{r}
+couple <- read.csv("cg.serum.couple.csv") 
+
+#Model 1
+
+mod1 <- lm(lnarg ~ zaritmean + copemean + age + female + 
+          white +  gtcol + lowinc + agear + affected, 
+          data = couple) 
+
+lm1 <- coeftest(mod1, vcovHC(mod1, type = "HC0")) 
+
+
+#Model 2
+
+mod2 <- lm(lnarg ~ zaritmean + copemean + zarit_cope + age + female + white + gtcol + lowinc + agear + affected, data = couple)
+
+
+lm2 <- coeftest(mod2, vcovHC(mod2, type = "HC0"))
+
+
+#Model 3
+
+mod3 <- lm(lnarg ~ zaritmean + copemean + zarit_cope + married + age + female + white + gtcol + lowinc + agear + affected + yrsknown + spouse, data = couple)
+
+
+lm3 <- coeftest(mod3, vcovHC(mod3, type = "HC0"))
+
+
+#Model 4
+
+mod4 <- lm(lnarg ~ zaritmean + copemean + zarit_cope + married + married_zarit + married_cope + age + female + white + gtcol + lowinc + agear + affected + yrsknown + spouse, data = couple)
+
+
+lm4 <- coeftest(mod4, vcovHC(mod4, type = "HC0"))
+
+
+#Model 5
+
+mod5 <- lm(lnarg ~ zaritmean + copemean + zarit_cope + married + yrsknown + ss_cg + spouse + age + female + white + gtcol + lowinc + agear + affected, data = couple)
+
+
+lm5 <- coeftest(mod5, vcovHC(mod5, type = "HC0"))
+
+
+#Model 6
+
+mod6 <- lm(lnarg~zaritmean+copemean+zarit_cope+married+yrsknown+yrs_zarit+yrs_cope+ss_cg+ss_cg_zarit+ss_cg_cope+spouse+age+female+white+gtcol+lowinc+agear+affected, data = couple) 
+
+
+lm6 <- coeftest(mod6, vcovHC(mod6, type = "HC0"))
+
+
+#Model 7
+
+mod7 <- lm(lnarg~zaritmean+copemean+zarit_cope+married+yrsknown+ss_cg+spouse+copt+age+female+white+gtcol+lowinc+agear+affected, data = couple) 
+
+
+lm7 <- coeftest(mod7, vcovHC(mod7, type = "HC0"))
+
+
+#Model 8
+
+mod8 <- lm(lnarg~zaritmean+copemean+zarit_cope+married+yrsknown+ss_cg+spouse+copt+copt_zarit+copt_cope+age+female+white+gtcol+lowinc+agear+affected, data = couple) 
+
+
+lm8 <- coeftest(mod8, vcovHC(mod8, type = "HC0"))
+
+
+#final
+
+m1 <- msummary(mod1, vcov = "HC", stars = TRUE)
+
+m2 <- msummary(mod2, vcov = "HC", stars = TRUE)
+
+m3 <- msummary(mod3, vcov = "HC", stars = TRUE)
+
+m4 <- msummary(mod4, vcov = "HC", stars = TRUE)
+
+m5 <- msummary(mod5, vcov = "HC", stars = TRUE)
+
+m6 <- msummary(mod6, vcov = "HC", stars = TRUE)
+
+m7 <- msummary(mod7, vcov = "HC", stars = TRUE)
+
+m8 <- msummary(mod8, vcov = "HC", stars = TRUE)
+
+
+```
+
+
+#Pairwise Correlations
+
+```{r}
+cor_df <- couple %>%
+  select(lnarg, zaritmean, copemean, married, spouse, copt)
+
+p_matrix <- rcorr(as.matrix(cor_df), type = "pearson")
+
+print(p_matrix$r, digits = 2)
+
+p_value <- p_matrix$P
+
+Signif <- symnum(p_value, corr = FALSE, na = FALSE, cutpoints = c(0, 
+    0.001, 0.01, 0.05, 0.1, 1), symbols = c("***", "**", "*", ".", " "), abbr.colnames = FALSE, )
+
+Signif
+
+#analyze conditionally on spouse = 1
+spouse_df <- couple %>%
+  subset(spouse == 1) %>%
+  select(lnarg, zaritmean, copemean, married, spouse, copt, yrsknown, ss_cg)
+
+c_matrix <- rcorr(as.matrix(spouse_df), type = "pearson")
+print(c_matrix$r, digits = 2)
+
+p_value_c <- c_matrix$P
+Signif_2 <- symnum(p_value_c, corr = FALSE, na = FALSE, cutpoints = c(0, 
+    0.001, 0.01, 0.05, 0.1, 1), symbols = c("***", "**", "*", ".", " "), abbr.colnames = FALSE, )
+
+Signif_2
+
+```
+
+#Moderation Effect Graph (Burden x Coping)
+
+```{r}
+copemean_strat <- summary(couple$copemean)
+couple$cope_quartile <- NA
+
+for (i in 1:nrow(couple)) {
+  copex <- couple$copemean[i]
+  if (copex > 0 & copex < copemean_strat[2]) {
+    couple$cope_quartile[i] <- "0-25%"
+  } else if (copex >= copemean_strat[2] & copex < copemean_strat[3]) {
+    couple$cope_quartile[i] <- "25-50"
+  } else if (copex >= copemean_strat[3] & copex < copemean_strat[5]) {
+    couple$cope_quartile[i] <- "50-75"
+  } else {
+    couple$cope_quartile[i] <- "75%+"
+  }
+}
+
+couple$cope_quartile <- as.factor(couple$cope_quartile)
+
+couple$predict <- predict(mod2)
+
+#plot_model(mod2, type = "pred", terms = c("zaritmean", "copemean"))
+  
+ggplot(data = couple,aes(x = zaritmean, y = predict, color = cope_quartile)) +
+  geom_point(alpha = 0, size = 0) +
+  geom_smooth(method = "lm", alpha = 0.1) +
+  theme_minimal() +
+  labs(x = "Caregiving Burden", 
+       y = "AVP (ln Transformed)",
+       color = "Coping Levels",
+       title = "Caregiving Burden x Coping on ln AVP levels") +
+ scale_fill_discrete(labels = c("0-25%", "25-50%", "50-75%", "75+%"))
+
+```
+
+
+#Additional Models
+```{r}
+#Model 9
+
+mod9 <- lm(lnarg~zaritmean+copemean+zarit_cope+married+spouse+ yrsknown+ss_cg+ ss_cg_zarit+ss_cg_cope +age+female+white+gtcol+lowinc+agear+affected, data = couple) 
+
+lm9 <- coeftest(mod9, vcovHC(mod9, type = "HC0"))
+
+m9 <- msummary(mod9, vcov = "HC", stars = TRUE)
+
+#Model 10
+
+mod10 <- lm(lnarg~zaritmean+copemean+zarit_cope+married+spouse+ yrsknown+ss_cg+ ss_cg_zarit+ss_cg_cope+copt+age+female+white+gtcol+lowinc+agear+affected, data = couple)
+
+lm10 <- coeftest(mod10, vcovHC(mod10, type = "HC0"))
+
+m10 <- msummary(mod10, vcov = "HC", stars = TRUE)
+
+stargazer(lm6,lm9, lm10, 
+         type = "text", 
+         column.labels = c("Model 6", "Model 9", "Model 10"))
+
+
+```
+
+#Moderation Graph, spouse = 1 (Coping*Spousal Uplift)
+```{r}
+#conditional on spouse = 1
+cond_spouse <- couple %>%
+  subset(spouse == 1)
+
+spouse_cope_strat <- summary(cond_spouse$copemean)
+
+cond_spouse$cope_quartile <- NA
+
+for (i in 1:nrow(cond_spouse)) {
+  copex <- cond_spouse$copemean[i]
+  if (copex > 0 & copex < spouse_cope_strat[2]) {
+    cond_spouse$cope_quartile[i] <- "0-25%"
+  } else if (copex >= spouse_cope_strat[2] & copex < spouse_cope_strat[3]) {
+    cond_spouse$cope_quartile[i] <- "25-50"
+  } else if (copex >= spouse_cope_strat[3] & copex < spouse_cope_strat[5]) {
+    cond_spouse$cope_quartile[i] <- "50-75"
+  } else {
+    cond_spouse$cope_quartile[i] <- "75%+"
+  }
+}
+
+
+#Model 9b
+
+mod9b <- lm(lnarg~zaritmean+copemean+zarit_cope+married+spouse+ yrsknown+ss_cg+ ss_cg_zarit+ss_cg_cope +age+female+white+gtcol+lowinc+agear+affected, data = cond_spouse) 
+
+lm9b <- coeftest(mod9b, vcovHC(mod9b, type = "HC0"))
+vcov_9b <- vcovHC(mod9b, type = "HC0")
+
+m9b <- msummary(mod9b, vcov = "HC", stars = TRUE)
+
+#Model 10b
+
+mod10b <- lm(lnarg~zaritmean+copemean+zarit_cope+married+spouse+ yrsknown+ss_cg+ ss_cg_zarit+ss_cg_cope+copt+age+female+white+gtcol+lowinc+agear+affected, data = cond_spouse)
+
+lm10b <- coeftest(mod10b, vcovHC(mod10b, type = "HC0"))
+vcov_10b <- vcovHC(mod10b, type = "HC0")
+
+m10b <- msummary(mod10b, vcov = "HC", stars = TRUE)
+
+#graphs
+
+#9
+cond_spouse$m9 <- predict(mod9b)
+
+a <- ggplot(data = cond_spouse,aes(x = ss_cg, y = m9, color = cope_quartile)) +
+  geom_point(alpha = 0, size = 0) +
+  geom_smooth(method = "lm", alpha = 0.1) +
+  theme_minimal() +
+  labs(x = "Spousal Uplift", 
+       y = "AVP (ln Transformed)",
+       color = "Coping Levels",
+       title = "Spousal Uplift x Coping on ln AVP levels, Model 9") +
+ scale_fill_discrete(labels = c("0-25%", "25-50%", "50-75%", "75+%"))
+
+#10
+cond_spouse$m10 <- predict(mod10b)
+
+b <- ggplot(data = cond_spouse,aes(x = ss_cg, y = m10, color = cope_quartile)) +
+  geom_point(alpha = 0, size = 0) +
+  geom_smooth(method = "lm", alpha = 0.1) +
+  theme_minimal() +
+  labs(x = "Spousal Uplift", 
+       y = "AVP (ln Transformed)",
+       color = "Coping Levels",
+       title = "Spousal Uplift x Coping on ln AVP levels, Model 10") +
+ scale_fill_discrete(labels = c("0-25%", "25-50%", "50-75%", "75+%"))
+
+plot_grid(a, b)
+
+
+```
+
+#Moderation Graph, spouse = 1 (Coping*Spousal Uplift Reversed)
+
+```{r}
+#conditional on spouse = 1
+uplift_strat <- summary(cond_spouse$ss_cg)
+
+cond_spouse$uplift_quartile <- NA
+
+for (i in 1:nrow(cond_spouse)) {
+  copex <- cond_spouse$ss_cg[i]
+  if (copex > 0 & copex < uplift_strat[2]) {
+    cond_spouse$uplift_quartile[i] <- "0-25%"
+  } else if (copex >= uplift_strat[2] & copex < uplift_strat[3]) {
+    cond_spouse$uplift_quartile[i] <- "25-50"
+  } else if (copex >= uplift_strat[3] & copex < uplift_strat[5]) {
+    cond_spouse$uplift_quartile[i] <- "50-75"
+  } else {
+    cond_spouse$uplift_quartile[i] <- "75%+"
+  }
+}
+
+#graphs
+
+#9
+
+c <- ggplot(data = cond_spouse,aes(x = copemean, y = m9, color = uplift_quartile)) +
+  geom_point(alpha = 0, size = 0) +
+  geom_smooth(method = "lm", alpha = 0.1) +
+  theme_minimal() +
+  labs(x = "Coping", 
+       y = "AVP (ln Transformed)",
+       color = "Uplift Levels ",
+       title = "Spousal Uplift x Coping on ln AVP levels, Model 9") +
+ scale_fill_discrete(labels = c("0-25%", "25-50%", "50-75%", "75+%"))
+
+#10
+
+d <- ggplot(data = cond_spouse,aes(x = copemean, y = m10, color = uplift_quartile)) +
+  geom_point(alpha = 0, size = 0) +
+  geom_smooth(method = "lm", alpha = 0.1) +
+  theme_minimal() +
+  labs(x = "Coping", 
+       y = "AVP (ln Transformed)",
+       color = "Uplift Levels",
+       title = "Spousal Uplift x Coping on ln AVP levels, Model 10") +
+ scale_fill_discrete(labels = c("0-25%", "25-50%", "50-75%", "75+%"))
+
+plot_grid(c, d)
+```
+
+#Figure 3
+
+```{r}
+scaleFUN <- function(x) sprintf("%.1f", x)
+
+#Panel A (based on model 2)
+panela <- ggplot(data = couple,aes(x = zaritmean, y = predict, color = cope_quartile)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  labs(x = "Caregiving Burden", 
+       y = "AVP (ln)",
+       color = "Coping",
+       title = "Effects of Caregiving Burden on AVP by Individual Coping") +
+  scale_color_grey(labels = c(bquote('< 25'^th ~ ptcl), 
+                              bquote('25'^th~ '- 75'^th ~ptcl),
+                              bquote('50'^th~ '- 75'^th ~ ptcl),
+                              bquote('> 75'^th ~ ptcl))) +
+  theme(panel.grid = element_line(linetype = 2)) +
+  scale_y_continuous(limits = c(7.3, 8.9)) +
+  scale_x_continuous(labels = scaleFUN)
+
+#Panel B (based on model 6) -- not on spouse = 1
+couple$m6 <- predict(mod6)
+
+uplift_m6 <- summary(couple$ss_cg)
+
+couple$uplift_quart <- NA
+
+for (i in 1:nrow(couple)) {
+  copex <- couple$ss_cg[i]
+  if (copex > 0 & copex < uplift_m6[2]) {
+    couple$uplift_quart[i] <- "0-25%"
+  } else if (copex >= uplift_m6[2] & copex < uplift_m6[3]) {
+    couple$uplift_quart[i] <- "25-50"
+  } else if (copex >= uplift_m6[3] & copex < uplift_m6[5]) {
+    couple$uplift_quart[i] <- "50-75"
+  } else {
+    couple$uplift_quart[i] <- "75%+"
+  }
+}
+
+panelb <- ggplot(data = couple,aes(x = copemean, y = m6, color = uplift_quart)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  labs(x = "Coping", 
+       y = "AVP (ln)",
+       color = "Uplift",
+       title = "Effects of Coping on AVP by Uplift") +
+  scale_color_grey(labels = c(bquote('< 25'^th ~ ptcl), 
+                              bquote('25'^th~ '- 75'^th ~ptcl), 
+                              bquote('50'^th~ '- 75'^th ~ ptcl),
+                              bquote('> 75'^th ~ ptcl))) +
+  theme(panel.grid = element_line(linetype = 2)) +
+  scale_y_continuous(limits = c(7.3, 8.9)) +
+  scale_x_continuous(labels = scaleFUN)
+
+
+#Panel C, based on model 8
+
+couple$m8 <- predict(mod8)
+
+panelc <- ggplot(data = couple, aes(x = zaritmean, y = m8, color = as.factor(copt))) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  labs(x = "Caregiving Burden", 
+       y = "AVP (ln)",
+       color = "Joint Participation",
+       title = "Effects of Caregiving Burden on AVP by Joint Participation") +
+  theme(panel.grid = element_line(linetype = 2)) +
+   scale_color_grey(labels = c("No", "Yes"))  +
+  scale_y_continuous(limits = c(7.3, 8.9)) +
+  scale_x_continuous(labels = scaleFUN)
+ 
+ 
+#Panel D
+
+paneld <- ggplot(data = couple, aes(x = copemean, y = m8, color = as.factor(copt))) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  labs(x = "Coping", 
+       y = "AVP (ln)",
+       color = "Joint Participation",
+       title = "Effect of Coping on AVP by Joint Participation") +
+  theme(panel.grid = element_line(linetype = 2)) +
+  scale_color_grey(labels = c("No", "Yes"))  +
+  scale_y_continuous(limits = c(7.3, 8.9)) +
+  scale_x_continuous(labels = scaleFUN)
+
+ 
+
+#Figure 2
+
+fig3 <- plot_grid(
+  plotlist = list(panela, panelb, panelc, paneld),
+  nrow = 2,
+  ncol = 2,
+  labels = "AUTO"
+)
+
+fig3_footnote <- add_sub(fig3, label = "AVP = Arginine Vasopressin", fontface = "plain",
+                hjust = 0, x = 0.02, size = 9)
+ggdraw(fig3_footnote)
+
+
+```
+
+#Cronbach Alpha
+```{r}
+studyid <- couple$studyid
+
+svy <- read.csv("~/Caregiving Data/cg.svy_17Feb2022.csv")
+svy <- svy %>%
+  subset(StudyID %in% studyid) %>%
+  select(StudyID, 
+         contains("cgd"),
+         contains("bc"))
+
+svy %>%
+  select(contains("cgd")) %>%
+  ltm::cronbach.alpha(na.rm = TRUE)
+
+svy %>%
+  select(contains("bc")) %>%
+  ltm::cronbach.alpha(na.rm = TRUE)
+
+couple$disease_cx <- NA
+
+for (i in 1:nrow(couple)) {
+  cat <- substr(couple$studyid[i], 1, 1)
+  if (cat == "1" | cat == "7") {
+    couple$disease_cx[i] <- "IEM"
+  } else if (cat == "2") {
+    couple$disease_cx[i] <- "HV"
+  } else if (cat == "4" | cat == "8") {
+    couple$disease_cx[i] <- "UDP"
+  }
+}
+
+table(couple$disease_cx)
+
+
+cor_df <- couple %>%
+  select(zaritmean, copemean, married, ss_cg, copt)
+
+cor_matrix <- cor(cor_df, use = "complete.obs")
+
+corrplot::corrplot(cor_matrix, 
+                   method = "number", 
+                   type = "upper")
+psych::corr.test(cor_df)$p
+```
+
+#Checks
+```{r}
+couple <- couple %>%
+  mutate(survey_comp = is.na(copemean))
+
+couples_yes <- couple %>%
+  subset(copt == 1)
+
+couples_no <-  couple %>%
+  subset(copt == 0)
+
+master <- read.csv("~/Caregiving Data/Master/cg.master_15Feb2023.csv")
+master_indv <- master %>%
+  subset(StudyID %in% couples_no$studyid) %>%
+  select(StudyID, NQ2) %>%
+  group_by(StudyID) %>%
+  mutate(NQ2_comp = ifelse(sum(NQ2, na.rm = TRUE) > 0, 1, 0)) %>%
+  ungroup() %>%
+  select(StudyID, NQ2_comp) %>%
+  unique()
+
+table(is.na(master_indv$NQ2_comp))
+
+master_coup <- master %>%
+  subset(StudyID %in% couples_yes$studyid) %>%
+  select(StudyID, NQ2) %>%
+  group_by(StudyID) %>%
+  mutate(NQ2_comp = ifelse(sum(NQ2, na.rm = TRUE) > 0, 1, 0)) %>%
+  ungroup() %>%
+  select(StudyID, NQ2_comp) %>%
+  unique()
+table(is.na(master_coup$NQ2_comp))
+```
+
+
+
+
+
+
+
+
+
