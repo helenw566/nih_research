@@ -1,0 +1,279 @@
+---
+title: "sc_merge_16Jan2023"
+author: "Helen"
+date: "2024-01-16"
+output:
+  word_document: default
+  html_document: default
+---
+#Library
+```{r}
+library(dplyr)
+library(gee)
+library(lmerTest)
+library(sjmisc)
+library(ggplot2)
+library(gtsummary)
+```
+
+#Files
+```{r}
+interview <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scInterviewData.WedJun191007002019.xlsx")
+survey <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scSurveyNumVars_24feb19.xlsx")
+```
+
+#Resilence Scale
+```{r}
+resilience_scale = subset(survey, select = c(1, 2, 65, 66, 67, 68, 69, 70))
+
+x = resilience_scale$rSetbacks
+for (i in 1:length(x)) {
+  if (is.na(x[i])) {
+    print(resilience_scale$studyID[i])
+  }
+}
+
+# missing all resilience data: 105003, 106000, 107000, 6040000
+#missing only one resilience question: 207008, 223001, 4330000
+likert_chr_to_num <-  c("Strongly agree" = 5, 
+                        "Agree" = 4, 
+                        "Neutral" = 3, 
+                        "Disagree" = 2, 
+                        "Strongly disagree" = 1)
+resilience_scale <- mutate(resilience_scale, across(starts_with("r"), 
+                                                    ~unname(likert_chr_to_num[.])))
+#reverse coding the 3 columns
+reverse_cols = c('rSnapBack','rHardTime', 'rSetbacks')
+resilience_scale[ , reverse_cols] = 6 - resilience_scale[ , reverse_cols]
+
+#calculating mean of resilience score
+resilience_scale <- resilience_scale %>% 
+  mutate(r_mean = rowMeans(resilience_scale[, 3:8], na.rm = TRUE))
+
+#add to survey
+
+survey$resilence_mean <- resilience_scale$r_mean
+```
+
+#Cleaning
+```{r}
+#gets list of IDs and SC status
+sc_list <- survey %>%
+  subset(stat1 != "notDT") %>%
+  select(studyID, stat1, BornCtry2, bornCtryD, bornCtryM, sex, ageNum, race2, IncomeA, EducLevel, marStat, resilence_mean) #131 
+
+colnames(sc_list) <- c("StudyID", "SC_STATUS", "Part_BornCtry", "Dad_BornCtry", "Mom_BornCtry", "Sex", "AgeNum", "Race", "Income", "Educ", "MarStat", "Resilence_Mean")
+
+#creates generation categories
+sc_list$first_gen <- ifelse(sc_list$Part_BornCtry == "not_US" & (sc_list$Dad_BornCtry == "not_US" | sc_list$Mom_BornCtry == "not_US"), 1, 0)
+
+sc_list$first_gen[is.na(sc_list$first_gen)] <- 0
+
+sc_list$second_gen <- ifelse(sc_list$Part_BornCtry == "US" & (sc_list$Dad_BornCtry == "not_US" | sc_list$Mom_BornCtry == "not_US"), 1, 0)
+
+sc_list$second_gen[is.na(sc_list$second_gen)] <- 0 
+
+sc_list$n_gen <- ifelse(sc_list$Part_BornCtry == "US" & sc_list$Dad_BornCtry == "US" & sc_list$Mom_BornCtry == "US", 1, 0)
+
+#checks for participants who are non US citizens but parents were
+sc_list$check <- ifelse(sc_list$Part_BornCtry == "not_US" & sc_list$Dad_BornCtry == "US" & sc_list$Mom_BornCtry == "US", 1, 0)
+
+#filters out participants from check
+sc_list <- sc_list %>% subset(check == 0)
+
+#merges datasets, gets only ones from sc_list
+df <- merge(sc_list, interview, by = "StudyID", all.x = TRUE)
+
+df$StudyID %>% unique() %>% length() #number matches (131), merge worked
+
+#Recode DiscTrait
+unique(df$DiscTrait)
+df$DiscTrait <- ifelse(df$DiscTrait != "1", NA, df$DiscTrait)
+
+#Recode WhoDiscSCD
+unique(df$WhoDiscSCD)
+df$WhoDiscSCD <- ifelse(df$WhoDiscSCD != "1", NA, df$WhoDiscSCD)
+
+#Preliminary Tables
+table(df$SC_STATUS)
+
+table(df$SC_STATUS, df$WhoDiscSCD)
+table(df$SC_STATUS, df$DiscTrait) 
+
+#Collapse DiscTrait and WhoDiscSCD into one col
+df <- df %>%
+  mutate(Disc_SC_Cleaned = coalesce(WhoDiscSCD, DiscTrait))
+
+df$Disc_SC_Cleaned[is.na(df$Disc_SC_Cleaned)] <- 0
+
+#table of Disc_SC_Cleaned
+table(df$Disc_SC_Cleaned)
+
+#factor var for gen
+df$generation <- NA
+for (i in 1:nrow(df)) {
+  if (df$first_gen[i] == 1) {
+    df$generation[i] <- "Gen 1"
+  } else if (df$second_gen[i] == 1) {
+    df$generation[i] <- "Gen 2"
+  } else if (df$n_gen[i] == 1) {
+    df$generation[i] <- "Gen N"
+  }
+}
+
+df$generation <- as.factor(df$generation)
+#df$generation <- relevel(df$generation, ref = "Gen N")
+
+df %>% select(StudyID, generation) %>% unique %>% select(generation) %>% table()
+
+#filling in missing famID
+df[is.na(df$FamID),]$FamID <- 600
+```
+
+#Covariates
+```{r}
+#Sex
+#df$Sex <- ifelse(df$Sex == "F", 1, 0) #1= female
+df$Sex <- as.factor(df$Sex)
+
+#Race
+#df$Race <- ifelse(df$Race == "W", 1, 0) #1= white
+df$Race <- as.factor(df$Race)
+
+#Income
+#df$Income <- ifelse(df$Income == "Prefer not to answer" | df$Income == "Don't know", NA, df$Income)
+
+#df$Income <- ifelse(df$Income == "$20,000 or less" | df$Income == "$20,001 to $35,000" | df$Income == "$35,001 to $50,000", 1, 0) #1 = less than 50k
+df$Income <- as.factor(df$Income)
+
+#Educ
+#df$Educ <- ifelse(df$Educ == "Some High School" | df$Educ == "High School Graduate" | df$Educ == "Associate Degree/ Some College" | df$Educ == "General Education Development (GED)", 1, 0) #1 = less than Bachelors
+df$Educ <- as.factor(df$Educ)
+
+#Marstat
+#df$MarStat <- ifelse(df$MarStat == "Married/ Living as Married", 1, 0) #1= married
+df$MarStat <- as.factor(df$MarStat)
+
+#AgeCat
+summary(df$AgeNum, na.rm = TRUE)
+
+
+df$ageCat <- NA
+
+for (i in 1:nrow(df)) {
+  if (is.na(df$AgeNum[i])) {
+    next
+  } else if (df$AgeNum[i] < 35) {
+    df$ageCat[i] <- "Less than 35"
+  } else if (df$AgeNum[i] >= 35 & df$AgeNum[i] < 45) {
+    df$ageCat[i] <- "35-44"
+  } else if (df$AgeNum[i] >= 45 & df$AgeNum[i] < 58) {
+     df$ageCat[i] <- "44-58"
+  } else if (df$AgeNum[i] >= 58) {
+    df$ageCat[i] <- "More than 57"
+  }
+}
+```
+
+
+#Models
+```{r}
+mod1 <- glmer(as.numeric(df$Disc_SC_Cleaned) ~ generation + 
+                 + (1|FamID),
+              glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)),
+              family = binomial(link="logit"),
+             data = df)
+
+mod1 %>% summary()
+
+mod2 <- glmer(as.numeric(df$Disc_SC_Cleaned) ~ generation + 
+               + (1|StudyID),
+              family = binomial(link="logit"),
+               glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)),
+             data = df)
+
+mod2 %>% summary()
+
+anova(mod1, mod2) #studyID is a better fit
+lmtest::lrtest(mod1, mod2)
+
+mod2 %>% summary() 
+
+mod3 <- glmer(as.numeric(df$Disc_SC_Cleaned) ~ Resilence_Mean + 
+               + (1|StudyID),
+              family = binomial(link="logit"),
+               glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)),
+             data = df) #not signif
+
+mod3 %>% summary()
+
+mod4 <- glmer(as.numeric(df$Disc_SC_Cleaned) ~ Resilence_Mean*generation + 
+               + (1|StudyID),
+              family = binomial(link="logit"),
+               glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)),
+             data = df)
+
+mod4 %>% summary()
+
+mod5 <- glmer(as.numeric(df$Disc_SC_Cleaned) ~ Sex*generation + 
+               + (1|StudyID),
+              family = binomial(link="logit"),
+               glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)),
+             data = df)
+
+mod5 %>% summary()
+
+sjPlot::plot_model(mod4, type = "int", terms = c("generation", "Resilence_Mean"))
+```
+#Mod - OR
+```{r}
+
+stargazer::stargazer(mod4, 
+                     title = "Model 4", type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.labels = "Discussing Sickle Cell",
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F)
+
+stargazer::stargazer(mod3, 
+                     title = "Model 3", type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.labels = "Discussing Sickle Cell",
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F)
+```
+
+
+#Descriptives
+```{r}
+#Demographics
+demo <- df %>% select(StudyID, generation, Educ, Income, AgeNum, Sex) %>% unique() %>% select(-StudyID)
+
+
+demo %>%
+  tbl_summary(by = generation) %>%
+  add_n() #this is demographics by generation
+
+demo %>%
+  tbl_summary(by = generation) %>%
+  add_n() #this is demographics without comparison
+
+#Sample Size
+length(unique(df$StudyID)) #number of participants (index)
+length(unique(df$UniqueID)) #number of unique alters
+length(df$UniqueID) #total number of alters (some alters showing up in multiple networks)
+length(unique(df$FamID)) 
+
+temp <- df %>% select(StudyID, generation) %>% unique()
+
+table(temp$generation) #breakdown by generation (index)
+table(is.na(temp$generation)) #true is the # missing
+
+
+table(df$generation) #breakdown by generation (alter)
+table(is.na(df$generation)) #true is the # missing
+
+```
+

@@ -1,0 +1,846 @@
+---
+title: "sc_visualization"
+author: "Helen"
+date: "2024-06-07"
+output:
+  word_document: default
+  html_document: default
+---
+#Library
+```{r}
+library(tidyverse)
+library(ggraph)
+library(tidygraph)
+library(igraph)
+library(ggpubr)
+library(sna)
+library(gtsummary)
+```
+
+#Files
+```{r}
+network <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scInterviewData.WedJun191007002019.xlsx")
+                    
+survey <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scSurveyNumVars_24feb19.xlsx")
+```
+
+#Old Resilence Scale Code
+```{r}
+resilience_scale = subset(survey, select = c(1, 2, 65, 66, 67, 68, 69, 70))
+
+x = resilience_scale$rSetbacks
+for (i in 1:length(x)) {
+  if (is.na(x[i])) {
+    print(resilience_scale$studyID[i])
+  }
+}
+
+# missing all resilience data: 105003, 106000, 107000, 6040000
+#missing only one resilience question: 207008, 223001, 4330000
+likert_chr_to_num <-  c("Strongly agree" = 5, 
+                        "Agree" = 4, 
+                        "Neutral" = 3, 
+                        "Disagree" = 2, 
+                        "Strongly disagree" = 1)
+resilience_scale <- mutate(resilience_scale, across(starts_with("r"), 
+                                                    ~unname(likert_chr_to_num[.])))
+#reverse coding the 3 columns
+reverse_cols = c('rSnapBack','rHardTime', 'rSetbacks')
+resilience_scale[ , reverse_cols] = 6 - resilience_scale[ , reverse_cols]
+
+#calculating mean of resilience score
+resilience_scale <- resilience_scale %>% 
+  mutate(r_mean = rowMeans(resilience_scale[, 3:8], na.rm = TRUE))
+
+#add to survey
+
+survey$resilence_mean <- resilience_scale$r_mean
+```
+
+
+#Data Cleaning
+```{r}
+#select and renames columns for survey
+survey_sub <- survey %>%
+  select(studyID, sex, ageNum, race2, IncomeA, EducLevel, marStat, resilence_mean)
+
+colnames(survey_sub) <- c("StudyID", "Part_Sex", "Part_Age", "Part_Race", "Part_Income", "Part_Educ", "Part_Marstat", "Part_Resilience")
+
+#recode NaN
+survey_sub$Part_Resilience <- ifelse(is.nan(survey_sub$Part_Resilience), NA, survey_sub$Part_Resilience)
+
+#select and renames columns for survey
+network_sub <- network %>%
+  select(FamID, StudyID, UniqueID, SCDT, EmoSupp, Relationship, EmoSuppNot, Gender)
+
+#filters for families with more or equal to 5 informants
+network_sub <- network_sub %>%
+  group_by(FamID) %>%
+  mutate(unique_part = length(unique(StudyID))) %>%
+  filter(unique_part >= 5) %>% #only about 8 families total at this point
+  ungroup()
+
+#merge dataframes
+df <- merge(network_sub, survey_sub, by = "StudyID", all.x = TRUE)
+```
+
+#Recode
+```{r}
+df <- df %>%
+  mutate(SCDT = recode(SCDT, "Yes, sickle cell disease" = 1,
+                       "Yes, sickle cell trait" = 2,
+                       "Neither" = 3,
+                       "Don't know" = 4)) %>%
+  mutate(EmoSupp = ifelse(EmoSupp == "NA" | EmoSupp == "0", NA, EmoSupp),
+         Relationship = ifelse(Relationship == "na", NA, Relationship),
+         Gender = ifelse(Gender == "Female", 1, 0),
+         Part_Sex = ifelse(Part_Sex == "F", 1, 0),
+         Part_Race = ifelse(Part_Race == "B", 1, 0)) %>%
+  mutate(EmoSuppNot = recode(EmoSuppNot,  "-1" = 1,
+                             "1" = 1)) %>%
+  mutate(Part_Income = recode(Part_Income, "$20,000 or less" = 1,
+                              "$20,001 to $35,000" = 2,
+                              "$35,001 to $50,000" = 3,
+                              "$50,001 to $75,000" = 4,
+                              "$75,001 to $100,000" = 5,
+                              "$100,001 to $125,000" = 6,
+                              "$125,001 to $150,000" = 7,
+                              "$150,001 to $200,000" = 8,
+                              "Greater than $200,000" = 9,
+                              "Don't know" = 10
+                              )) %>%
+  mutate(Part_Educ = recode(Part_Educ, "High School Graduate" = 1,
+                                               "Associate Degree/ Some College" = 2,
+                                               "Technical/ Vocational Training" = 3,
+                                               "Bachelor's Degree" = 4,
+                                               "Graduate or Post-Graduate Degree" = 5,
+                                               "General Education Development (GED)" = 6,
+                                                "Some High School" = 7)) %>%
+  mutate(Part_Marstat = recode(Part_Marstat, "Married/ Living as Married" = 1,
+                                                     "Widowed"  = 2,
+                                                     "Never Married/ Single" = 3,
+                                                     "Divorced" = 4,
+                                                     "Separated" = 5))
+```
+#Checking SCDT Col in Interview Data
+```{r}
+survey$SCDT_test <- case_when(survey$stat2 == "scD" ~ 1,
+                                         survey$stat2 == "scT" ~ 2,
+                                         survey$stat2 == "negDT" ~ 3,
+                                         survey$stat2 == "Untst/DK" ~ 4
+                                         )
+
+df$src <- ifelse(df$StudyID == df$UniqueID, "Participant", "Enumerant")
+df3 <- subset(df, src == "Participant" )
+
+
+test <- merge(df3, survey, by.x = "StudyID", by.y = "studyID", all.x = TRUE)
+
+test[which(is.na(test$SCDT_test == test$SCDT)),] %>% select(SCDT, SCDT_test)
+
+```
+
+#Network List
+```{r}
+list_id <- df$FamID %>% unique()
+list_studyid <- df$StudyID %>% unique()
+```
+
+#Graph 1
+```{r}
+fam1 <- df %>%
+  subset(FamID == list_id[1])
+
+fam1$src <- ifelse(fam1$StudyID == fam1$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam1$StudyID, fam1$UniqueID) %>% unique()
+
+nodes_1_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam1[fam1$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+
+links_1_df <- fam1 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+test <- fam1 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_1_df <- merge(nodes_1_df, test, by = "name", all.x = TRUE)
+
+#links
+links_1_df <- fam1 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_1_df <- links_1_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_1_df <- unique(links_1_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_1_df$from <- as.character(links_1_df$from)
+links_1_df$to <- as.character(links_1_df$to)
+
+#ggraph version
+
+fam1_net <- tbl_graph(nodes = nodes_1_df,
+                        edges = links_1_df,
+                        directed = TRUE)
+
+network_1_graph <- ggraph(fam1_net, layout = "stress") +
+   geom_edge_link(aes(color = EmoSupp)) +
+  geom_node_point(size = 4, aes(color = Part_Resilience, shape = Participant)) +
+  theme_void() +
+  theme(legend.position = "bottom") + 
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+    labs(title = "Family 207 Network Graph")
+show(network_1_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 207 Network Graph.jpeg",
+#     plot = network_1_graph,
+#     path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#     width = 11.5,
+#     height = 8.00,
+#     units = "in",
+#     dpi = 300
+#   )  
+
+```
+
+#Graph 2
+```{r}
+fam2 <- df %>%
+  subset(FamID == list_id[2])
+
+fam2$src <- ifelse(fam2$StudyID == fam2$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam2$StudyID, fam2$UniqueID) %>% unique()
+
+nodes_2_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam2[fam2$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+ 
+links_2_df <- fam2 %>% select(from = StudyID, to = UniqueID, EmoSupp,
+                              Part_Resilience) %>% unique()
+test <- fam2 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_2_df <- merge(nodes_2_df, test, by = "name", all.x = TRUE)
+
+#links
+links_2_df <- fam2 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_2_df <- links_2_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_2_df <- unique(links_2_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_2_df$from <- as.character(links_2_df$from)
+links_2_df$to <- as.character(links_2_df$to)
+
+#ggraph version
+
+fam2_net <- tbl_graph(nodes = nodes_2_df,
+                      edges = links_2_df,
+                      directed = TRUE)
+
+network_2_graph <- ggraph(fam2_net, layout = "stress") +
+  geom_edge_link(aes(color = EmoSupp))+
+  geom_node_point(aes(color = Part_Resilience, shape = Participant), size = 4) +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+  labs(title = "Family 219 Network Graph")
+show(network_2_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 219 Network Graph.jpeg",
+#        plot = network_2_graph,
+#        path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#        width = 11.5,
+#        height = 8.00,
+#        units = "in",
+#        dpi = 300
+# )  
+
+```
+
+#Graph 3
+```{r}
+fam3 <- df %>%
+  subset(FamID == list_id[3])
+
+fam3$src <- ifelse(fam3$StudyID == fam3$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam3$StudyID, fam3$UniqueID) %>% unique()
+
+nodes_3_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam3[fam3$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+
+links_3_df <- fam3 %>% select(from = StudyID, to = UniqueID, EmoSupp,
+                              Part_Resilience) %>% unique()
+test <- fam3 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_3_df <- merge(nodes_3_df, test, by = "name", all.x = TRUE)
+
+#links
+links_3_df <- fam3 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_3_df <- links_3_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_3_df <- unique(links_3_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_3_df$from <- as.character(links_3_df$from)
+links_3_df$to <- as.character(links_3_df$to)
+
+#ggraph version
+
+fam3_net <- tbl_graph(nodes = nodes_3_df,
+                      edges = links_3_df,
+                      directed = TRUE)
+
+network_3_graph <- ggraph(fam3_net, layout = "stress") +
+  geom_edge_link(aes(color = EmoSupp))+
+  geom_node_point(aes(color = Part_Resilience, shape = Participant), size = 4) +
+  theme_void() +
+  theme(legend.position = "bottom") + 
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+  labs(title = "Family 223 Network Graph")
+show(network_3_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 223 Network Graph.jpeg",
+#        plot = network_3_graph,
+#        path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#        width = 11.5,
+#        height = 8.00,
+#        units = "in",
+#        dpi = 300
+# )  
+
+```
+
+#Graph 4
+```{r}
+fam4 <- df %>%
+  subset(FamID == list_id[4])
+
+fam4$src <- ifelse(fam4$StudyID == fam4$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam4$StudyID, fam4$UniqueID) %>% unique()
+
+nodes_4_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam4[fam4$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+
+links_4_df <- fam4 %>% select(from = StudyID, to = UniqueID, EmoSupp,
+                              Part_Resilience) %>% unique()
+test <- fam4 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_4_df <- merge(nodes_4_df, test, by = "name", all.x = TRUE)
+
+#links
+links_4_df <- fam4 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_4_df <- links_4_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_4_df <- unique(links_4_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_4_df$from <- as.character(links_4_df$from)
+links_4_df$to <- as.character(links_4_df$to)
+
+#ggraph version
+
+fam4_net <- tbl_graph(nodes = nodes_4_df,
+                      edges = links_4_df,
+                      directed = TRUE)
+
+network_4_graph <- ggraph(fam4_net, layout = "stress") +
+  geom_edge_link(aes(color = EmoSupp))+
+  geom_node_point(aes(color = Part_Resilience, shape = Participant), size = 4) +
+  theme_void() +
+  theme(legend.position = "bottom") + 
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+  labs(title = "Family 404 Network Graph")
+show(network_4_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 404 Network Graph.jpeg",
+#        plot = network_4_graph,
+#        path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#        width = 11.5,
+#        height = 8.00,
+#        units = "in",
+#        dpi = 300
+# )  
+
+```
+
+#Graph 5
+```{r}
+fam5 <- df %>%
+  subset(FamID == list_id[5])
+
+fam5$src <- ifelse(fam5$StudyID == fam5$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam5$StudyID, fam5$UniqueID) %>% unique()
+
+nodes_5_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam5[fam5$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+
+links_5_df <- fam5 %>% select(from = StudyID, to = UniqueID, EmoSupp,
+                              Part_Resilience) %>% unique()
+test <- fam5 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_5_df <- merge(nodes_5_df, test, by = "name", all.x = TRUE)
+
+#links
+links_5_df <- fam5 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_5_df <- links_5_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_5_df <- unique(links_5_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_5_df$from <- as.character(links_5_df$from)
+links_5_df$to <- as.character(links_5_df$to)
+
+#ggraph version
+
+fam5_net <- tbl_graph(nodes = nodes_5_df,
+                      edges = links_5_df,
+                      directed = TRUE)
+
+network_5_graph <- ggraph(fam5_net, layout = "stress") +
+  geom_edge_link(aes(color = EmoSupp))+
+  geom_node_point(aes(color = Part_Resilience, shape = Participant), size = 4) +
+  theme_void() +
+  theme(legend.position = "bottom") + 
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+  labs(title = "Family 432 Network Graph")
+show(network_5_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 432 Network Graph.jpeg",
+#        plot = network_5_graph,
+#        path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#        width = 11.5,
+#        height = 8.00,
+#        units = "in",
+#        dpi = 300
+# )  
+
+```
+
+#Graph 6
+```{r}
+fam6 <- df %>%
+  subset(FamID == list_id[6])
+
+fam6$src <- ifelse(fam6$StudyID == fam6$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam6$StudyID, fam6$UniqueID) %>% unique()
+
+nodes_6_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam6[fam6$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+
+links_6_df <- fam6 %>% select(from = StudyID, to = UniqueID, EmoSupp,
+                              Part_Resilience) %>% unique()
+test <- fam6 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_6_df <- merge(nodes_6_df, test, by = "name", all.x = TRUE)
+
+#links
+links_6_df <- fam6 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_6_df <- links_6_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_6_df <- unique(links_6_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_6_df$from <- as.character(links_6_df$from)
+links_6_df$to <- as.character(links_6_df$to)
+
+#ggraph version
+
+fam6_net <- tbl_graph(nodes = nodes_6_df,
+                      edges = links_6_df,
+                      directed = TRUE)
+
+network_6_graph <- ggraph(fam6_net, layout = "stress") +
+  geom_edge_link(aes(color = EmoSupp))+
+  geom_node_point(aes(color = Part_Resilience, shape = Participant), size = 4) +
+  theme_void() +
+  theme(legend.position = "bottom") + 
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+  labs(title = "Family 433 Network Graph")
+show(network_6_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 433 Network Graph.jpeg",
+#        plot = network_6_graph,
+#        path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#        width = 11.5,
+#        height = 8.00,
+#        units = "in",
+#        dpi = 300
+# )  
+
+```
+
+#Graph 7
+```{r}
+fam7 <- df %>%
+  subset(FamID == list_id[7])
+
+fam7$src <- ifelse(fam7$StudyID == fam7$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam7$StudyID, fam7$UniqueID) %>% unique()
+
+nodes_7_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam7[fam7$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+
+links_7_df <- fam7 %>% select(from = StudyID, to = UniqueID, EmoSupp,
+                              Part_Resilience) %>% unique()
+test <- fam7 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_7_df <- merge(nodes_7_df, test, by = "name", all.x = TRUE)
+
+#links
+links_7_df <- fam7 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_7_df <- links_7_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_7_df <- unique(links_7_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_7_df$from <- as.character(links_7_df$from)
+links_7_df$to <- as.character(links_7_df$to)
+
+#ggraph version
+
+fam7_net <- tbl_graph(nodes = nodes_7_df,
+                      edges = links_7_df,
+                      directed = TRUE)
+
+network_7_graph <- ggraph(fam7_net, layout = "stress") +
+  geom_edge_link(aes(color = EmoSupp))+
+  geom_node_point(aes(color = Part_Resilience, shape = Participant), size = 4) +
+  theme_void() +
+  theme(legend.position = "bottom") + 
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+  labs(title = "Family 512 Network Graph")
+show(network_7_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 512 Network Graph.jpeg",
+#        plot = network_7_graph,
+#        path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#        width = 11.5,
+#        height = 8.00,
+#        units = "in",
+#        dpi = 300
+# )  
+
+```
+
+#Graph 8
+```{r}
+fam8 <- df %>%
+  subset(FamID == list_id[8])
+
+fam8$src <- ifelse(fam8$StudyID == fam8$UniqueID, "Participant", "Enumerant")
+
+#nodes
+temp <- c(fam8$StudyID, fam8$UniqueID) %>% unique()
+
+nodes_8_df <- data.frame(name = temp) %>%
+  mutate(Participant = ifelse(name %in% fam8[fam8$src == "Participant",]$StudyID, "Participant", "Enumerant"))
+
+links_8_df <- fam8 %>% select(from = StudyID, to = UniqueID, EmoSupp,
+                              Part_Resilience) %>% unique()
+test <- fam8 %>% select(StudyID, Part_Resilience) %>% unique()
+colnames(test) <- c("name", "Part_Resilience")
+nodes_8_df <- merge(nodes_8_df, test, by = "name", all.x = TRUE)
+
+#links
+links_8_df <- fam8 %>% select(from = StudyID, to = UniqueID, EmoSupp) %>% unique()
+
+links_8_df <- links_8_df %>%
+  filter(!(from == to)) #removes links that connect to itself
+
+links_8_df <- unique(links_8_df[c("from", "to", "EmoSupp")]) #remove duplicate links
+
+links_8_df$from <- as.character(links_8_df$from)
+links_8_df$to <- as.character(links_8_df$to)
+
+#ggraph version
+
+fam8_net <- tbl_graph(nodes = nodes_8_df,
+                      edges = links_8_df,
+                      directed = TRUE)
+
+network_8_graph <- ggraph(fam8_net, layout = "stress") +
+  geom_edge_link(aes(color = EmoSupp))+
+  geom_node_point(aes(color = Part_Resilience, shape = Participant), size = 4) +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  scale_edge_colour_manual(values = c("magenta2"),
+                           na.value="lightgrey") +
+  labs(title = "Family 607 Network Graph")
+show(network_8_graph)
+
+#saving the graph
+
+# ggsave(filename = "Family 607 Network Graph.jpeg",
+#        plot = network_8_graph,
+#        path = "C:/Users/brookesjj/Desktop/RStudio/Marlena - Sickle Cell/Output",
+#        width = 11.5,
+#        height = 8.00,
+#        units = "in",
+#        dpi = 300
+# )  
+
+```
+
+#Descriptives - Partiticipant Level
+```{r}
+#creates functions to get descriptive stats for each studyid network
+network_descriptives <- function(x) {
+  x_edges <- df %>%
+    subset(StudyID == list_studyid[x]) %>% 
+    select(from = StudyID, to = UniqueID, EmoSupp) %>% 
+    unique() %>%
+    filter(!(from == to)) %>%
+    unique() %>%
+    mutate(from = as.character(from),
+           to = as.character(to))
+  x_net <- network::network(x_edges, matrix.type="edgelist")
+  
+  #network stats
+  x_net_nstat <- data.frame(StudyID = list_studyid[x],
+                            Network_Size = network.size(x_net), #number of nodes
+                            Edge_N = network.edgecount(x_net), #number  of edges
+                            Dyad_Mutual = sna::dyad.census(x_net)[1], #mutual dyads
+                            Dyad_Asym = sna::dyad.census(x_net)[2],
+                            Dyad_Null = sna::dyad.census(x_net)[3],
+                            Mean_OutDegree = mean(sna::degree(x_net, cmode = "outdegree")), #mean outdegree,
+                            Mean_InDegree = mean(sna::degree(x_net, cmode = "indegree")), #mean indegree
+                            Density = gden(x_net), #density
+                            Diameter = diameter(graph_from_edgelist(as.matrix(x_edges[,-3]))), 
+                            Mean_Distance = mean_distance(graph_from_edgelist(as.matrix(x_edges[,-3])), directed = TRUE), #avg # of edges between 2 nodes
+                            Reciprocity = reciprocity(graph_from_edgelist(as.matrix(x_edges[,-3]))),
+                            Transitivity = transitivity(graph_from_edgelist(as.matrix(x_edges[,-3])))
+                            )
+  
+  x_triad <- sna::triad.census(x_net) %>% as.data.frame()
+  colnames(x_triad) <- paste0("triad_", colnames(x_triad))
+  
+  net_x <- cbind(x_net_nstat, x_triad)
+  return(net_x)
+}
+
+#loops to do statistics for each
+count <- 1
+net_stats <- network_descriptives(1)
+
+while (count != length(list_studyid)) {
+  count <- count + 1
+  net_x <- network_descriptives(count)
+  net_stats <- rbind(net_stats, net_x)
+}
+
+#adds resilence to network stats
+temp_add <- df %>% subset(StudyID == UniqueID) %>% select(StudyID, Part_Resilience, SCDT) %>% unique() 
+
+net_stats <- merge(temp_add, net_stats, by = "StudyID", all.y = T) 
+
+net_stats$resilence_dich <- ifelse(net_stats$Part_Resilience >= mean(net_stats$Part_Resilience, na.rm = T), "High", "Low")
+
+net_stats$SCDT <- as.factor(net_stats$SCDT)
+
+#exporatory graphs
+ggplot(net_stats, aes(x = resilence_dich, y = Network_Size, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Edge_N, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Dyad_Mutual, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Dyad_Asym, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Dyad_Null, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Mean_OutDegree, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Mean_InDegree, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Density, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Diameter, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Mean_Distance, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Reciprocity, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats, aes(x = resilence_dich, y = Transitivity, col = resilence_dich, fill = SCDT)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+net_stats %>%
+  select(-c(StudyID, Part_Resilience, SCDT)) %>%
+  tbl_summary(by = resilence_dich, 
+              type = everything() ~ "continuous",
+              statistic = all_continuous() ~ "{mean} ({sd})")
+
+```
+
+#Descriptives - Family
+```{r}
+#creates functions to get descriptive stats for each family network
+network_descriptives_fam <- function(x) {
+  x_edges <- df %>%
+    subset(FamID == list_id[x]) %>% 
+    select(from = StudyID, to = UniqueID, EmoSupp) %>% 
+    unique() %>%
+    filter(!(from == to)) %>%
+    unique() %>%
+    mutate(from = as.character(from),
+           to = as.character(to))
+  x_net <- network::network(x_edges, matrix.type="edgelist")
+  
+  #network stats
+  x_net_nstat <- data.frame(FamID = list_id[x],
+                            Network_Size = network.size(x_net), #number of nodes
+                            Edge_N = network.edgecount(x_net), #number  of edges
+                            Dyad_Mutual = sna::dyad.census(x_net)[1], #mutual dyads
+                            Dyad_Asym = sna::dyad.census(x_net)[2],
+                            Dyad_Null = sna::dyad.census(x_net)[3],
+                            Mean_OutDegree = mean(sna::degree(x_net, cmode = "outdegree")), #mean outdegree,
+                            Mean_InDegree = mean(sna::degree(x_net, cmode = "indegree")), #mean indegree
+                            Density = gden(x_net), #density
+                            Diameter = diameter(graph_from_edgelist(as.matrix(x_edges[,-3]))), 
+                            Mean_Distance = mean_distance(graph_from_edgelist(as.matrix(x_edges[,-3])), directed = TRUE), #avg # of edges between 2 nodes
+                            Reciprocity = reciprocity(graph_from_edgelist(as.matrix(x_edges[,-3]))),
+                            Transitivity = transitivity(graph_from_edgelist(as.matrix(x_edges[,-3])))
+  )
+  
+  x_triad <- sna::triad.census(x_net) %>% as.data.frame()
+  colnames(x_triad) <- paste0("triad_", colnames(x_triad))
+  
+  net_x <- cbind(x_net_nstat, x_triad)
+  return(net_x)
+}
+
+#loops to do statistics for each
+count <- 1
+net_stats_fam <- network_descriptives_fam(1)
+
+while (count != length(list_id)) {
+  count <- count + 1
+  net_x <- network_descriptives_fam(count)
+  net_stats_fam <- rbind(net_stats_fam, net_x)
+}
+
+#adds resilence to network stats
+temp <- df %>%
+  select(FamID, Part_Resilience) %>%
+  group_by(FamID) %>%
+  summarize(Part_Resilience = mean(Part_Resilience, na.rm = TRUE)) 
+  
+
+net_stats_fam <- merge(temp, net_stats_fam, by = "FamID", all.y = T) 
+
+net_stats_fam$resilence_dich <- ifelse(net_stats_fam$Part_Resilience >= mean(net_stats_fam$Part_Resilience, na.rm = T), "High", "Low")
+
+#exporatory graphs
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Network_Size, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Edge_N, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Dyad_Mutual, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Dyad_Asym, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Dyad_Null, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Mean_OutDegree, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Mean_InDegree, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Density, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Diameter, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Mean_Distance, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Reciprocity, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+ggplot(net_stats_fam, aes(x = resilence_dich, y = Transitivity, col = resilence_dich)) +
+  geom_boxplot(size = 0.5, outlier.shape = NA) +
+  geom_jitter()
+
+net_stats_fam %>%
+  select(-c(FamID, Part_Resilience)) %>%
+  tbl_summary(by = resilence_dich, 
+              type = everything() ~ "continuous",
+              statistic = all_continuous() ~ "{mean} ({sd})")
+```
+
