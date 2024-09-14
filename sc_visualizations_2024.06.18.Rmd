@@ -1,6 +1,6 @@
 ---
 title: "sc_visualization"
-author: "Helen"
+author: "Helen & Jama"
 date: "2024-06-07"
 output:
   word_document: default
@@ -19,12 +19,12 @@ library(gtsummary)
 
 #Files
 ```{r}
-network <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scInterviewData.WedJun191007002019.xlsx")
+network <- readxl::read_excel("~/Data/scInterviewData.WedJun191007002019.xlsx")
                     
-survey <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scSurveyNumVars_24feb19.xlsx")
+survey <- readxl::read_excel("~/Data/scSurveyNumVars_24feb19.xlsx")
 ```
 
-#Old Resilence Scale Code
+#Resilence Scale
 ```{r}
 resilience_scale = subset(survey, select = c(1, 2, 65, 66, 67, 68, 69, 70))
 
@@ -53,7 +53,6 @@ resilience_scale <- resilience_scale %>%
   mutate(r_mean = rowMeans(resilience_scale[, 3:8], na.rm = TRUE))
 
 #add to survey
-
 survey$resilence_mean <- resilience_scale$r_mean
 ```
 
@@ -77,7 +76,7 @@ network_sub <- network %>%
 network_sub <- network_sub %>%
   group_by(FamID) %>%
   mutate(unique_part = length(unique(StudyID))) %>%
-  filter(unique_part >= 5) %>% #only about 8 families total at this point
+  filter(unique_part >= 5) %>% #only about 8 families 
   ungroup()
 
 #merge dataframes
@@ -122,6 +121,7 @@ df <- df %>%
                                                      "Divorced" = 4,
                                                      "Separated" = 5))
 ```
+
 #Checking SCDT Col in Interview Data
 ```{r}
 survey$SCDT_test <- case_when(survey$stat2 == "scD" ~ 1,
@@ -135,7 +135,6 @@ df3 <- subset(df, src == "Participant" )
 
 
 test <- merge(df3, survey, by.x = "StudyID", by.y = "studyID", all.x = TRUE)
-
 test[which(is.na(test$SCDT_test == test$SCDT)),] %>% select(SCDT, SCDT_test)
 
 ```
@@ -617,7 +616,7 @@ show(network_8_graph)
 
 ```
 
-#Descriptives - Partiticipant Level
+#Descriptives - Participant Level
 ```{r}
 #creates functions to get descriptive stats for each studyid network
 network_descriptives <- function(x) {
@@ -673,7 +672,7 @@ net_stats$resilence_dich <- ifelse(net_stats$Part_Resilience >= mean(net_stats$P
 
 net_stats$SCDT <- as.factor(net_stats$SCDT)
 
-#exporatory graphs
+#exploratory graphs
 ggplot(net_stats, aes(x = resilence_dich, y = Network_Size, col = resilence_dich, fill = SCDT)) +
   geom_boxplot(size = 0.5, outlier.shape = NA) +
   geom_jitter()

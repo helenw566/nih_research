@@ -1,6 +1,6 @@
 ---
 title: "sc_merge_16Jan2023"
-author: "Helen"
+author: "Helen & Jama"
 date: "2024-01-16"
 output:
   word_document: default
@@ -18,8 +18,8 @@ library(gtsummary)
 
 #Files
 ```{r}
-interview <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scInterviewData.WedJun191007002019.xlsx")
-survey <- readxl::read_excel("~/Marlena - Sickle Cell/Data/scSurveyNumVars_24feb19.xlsx")
+interview <- readxl::read_excel("~/Data/scInterviewData.WedJun191007002019.xlsx")
+survey <- readxl::read_excel("~/Data/scSurveyNumVars_24feb19.xlsx")
 ```
 
 #Resilence Scale
@@ -34,7 +34,7 @@ for (i in 1:length(x)) {
 }
 
 # missing all resilience data: 105003, 106000, 107000, 6040000
-#missing only one resilience question: 207008, 223001, 4330000
+# missing only one resilience question: 207008, 223001, 4330000
 likert_chr_to_num <-  c("Strongly agree" = 5, 
                         "Agree" = 4, 
                         "Neutral" = 3, 
@@ -132,32 +132,12 @@ df[is.na(df$FamID),]$FamID <- 600
 
 #Covariates
 ```{r}
-#Sex
-#df$Sex <- ifelse(df$Sex == "F", 1, 0) #1= female
 df$Sex <- as.factor(df$Sex)
-
-#Race
-#df$Race <- ifelse(df$Race == "W", 1, 0) #1= white
 df$Race <- as.factor(df$Race)
-
-#Income
-#df$Income <- ifelse(df$Income == "Prefer not to answer" | df$Income == "Don't know", NA, df$Income)
-
-#df$Income <- ifelse(df$Income == "$20,000 or less" | df$Income == "$20,001 to $35,000" | df$Income == "$35,001 to $50,000", 1, 0) #1 = less than 50k
 df$Income <- as.factor(df$Income)
-
-#Educ
-#df$Educ <- ifelse(df$Educ == "Some High School" | df$Educ == "High School Graduate" | df$Educ == "Associate Degree/ Some College" | df$Educ == "General Education Development (GED)", 1, 0) #1 = less than Bachelors
 df$Educ <- as.factor(df$Educ)
-
-#Marstat
-#df$MarStat <- ifelse(df$MarStat == "Married/ Living as Married", 1, 0) #1= married
 df$MarStat <- as.factor(df$MarStat)
-
-#AgeCat
 summary(df$AgeNum, na.rm = TRUE)
-
-
 df$ageCat <- NA
 
 for (i in 1:nrow(df)) {

@@ -1,0 +1,382 @@
+---
+title: "cg.clusters_27March2024"
+author: "Helen"
+date: "2024-03-27"
+output: html_document
+---
+#Library
+```{r}
+library(dplyr)
+library(factoextra)
+library(cluster)
+library(fpc) # for calinhara function
+library(NbClust)
+library(clValid)
+library(nnet)
+library(lmtest)
+library(sandwich)
+```
+
+#Files
+```{r}
+svy <- read.csv("~/Caregiving Data/cg.svy_18April2024.csv")
+net <- read.csv("~/Caregiving Data/Master/cg.master_updated_10May2024.csv")
+```
+
+#Cleaning
+```{r}
+#demo
+demo <- svy %>% select(studyid, age, hhinc, educate, cr_age_cln, race, marstat, educate, gender)
+#subsetting
+svy <- svy %>% select(studyid, cgd_mean, pac_mean, bs_mean, cgs_mean, starts_with("cgra"), pocg2, cesd_mean, sf12mental, sf12physical)
+
+net <- net %>% filter(NQ2 == TRUE, part_cr_rel_NQ2 %in% c("mother", "father", "step-mother", "step-father"))
+
+#computing self-efficacy scale
+svy <- svy %>%
+  rowwise() %>%
+  mutate(cgra7_r = recode(cgra7, '1' = 5, '2' = 4, '3' = 3, '4' = 2, '5' = 1),
+         se_mean = mean(c(cgra1, cgra7_r, cgra10, cgra23, cgra20, cgra13, pocg2), na.rm = TRUE)) %>%
+  select(-c(starts_with("cgra"), pocg2))
+
+# se_mean = mean(c(cgra1_r, cgra7, cgra10_r, cgra23_r, cgra20_r, cgra13, pocg2), na.rm = TRUE)) %>%
+
+#computing NS, MNU
+malf_col <- c("q8", "q11", "q12", "q15", "q16", "q17", "q5")
+nonf_col <- c("q3", "q10", "q14", "q36")
+uplift_col <- c("q2", "q6", "q7", "q9", "q13", "q18", "q19", "q35")
+
+net <- net %>%
+  subset(nchar(C_Convoy_NQ2) > 0) %>% #gets people only in Caregiver's Network
+  group_by(StudyID) %>%
+  mutate(network.size = n()) %>%
+  ungroup() %>%
+  select(StudyID, network.size, contains("NQ2")) %>%
+  rename_with(~ gsub("[_]NQ2$", "", .x)) %>%
+  mutate(malf_score = select(., all_of(malf_col)) %>% rowSums(na.rm = TRUE),
+         nonf_score = select(., all_of(nonf_col)) %>% rowSums(na.rm = TRUE),
+         uplift_score = select(., all_of(uplift_col)) %>% rowSums(na.rm = TRUE)) %>%
+  select(studyid = StudyID, network.size, malf_score, nonf_score, uplift_score)
+
+net <- net %>%
+  mutate(malf_score = ifelse(malf_score > 0, 1, 0),
+         nonf_score = ifelse(nonf_score > 0, 1, 0),
+         uplift_score = ifelse(uplift_score > 1, 1, 0))
+
+mnu_agg <- aggregate(net[,c(3:5)], by = list(net$studyid), sum, na.rm = TRUE)
+colnames(mnu_agg)[1] <- "studyid"
+
+net_Df <- merge(unique(net[,1:2]), mnu_agg, by = "studyid")
+
+#merge df
+fin  <- merge(net_Df, svy, by = "studyid", all.x = TRUE)
+fin <- na.omit(fin)
+
+#disease cx
+fin$fam_sub <- substr(fin$studyid, 1, 1)
+fin$disease_cx <- NA
+
+for (i in 1:nrow(fin)) {
+  if (fin$fam_sub[i] == 1 | fin$fam_sub[i] == 7) {
+    fin$disease_cx[i] <- "IEM"
+  } else if (fin$fam_sub[i] == 4 | fin$fam_sub[i] == 8) {
+    fin$disease_cx[i] <- "UDP"
+  } else {
+    fin$disease_cx[i] <- "HV"
+  }
+}
+
+#column_names
+colnames(fin) <- c("studyid", "network_size", "malf", "nonf", "uplift", "cg_demand", "pos_aspects_cg", "brief_resilience", "cg_stress", "depression", "sf12mental", "sf12physical", "self_esteem", "fam_sub", "disease_cx")
+
+#drop cols
+fin <- fin %>%
+  select(-fam_sub)
+```
+
+#Clustering Data
+```{r}
+#prepares dataframe for k means clustering
+cluster_df <- fin
+rownames(cluster_df) <- fin$studyid
+
+cluster_df <- cluster_df %>%
+  select(-c(studyid, network_size, disease_cx, depression, sf12mental, sf12physical))
+
+#scales data
+
+cluster_df <- scale(cluster_df)
+```
+
+#Cluster Numbers
+```{r}
+#Elbow Method
+fviz_nbclust(cluster_df,
+             kmeans,
+             nstart =  25,
+             iter.max = 1000, 
+             method = "wss") #5ish?
+
+#Average Silhouette Method
+
+fviz_nbclust(cluster_df,
+             kmeans,
+             method = "silhouette") #2 
+
+#Gap Statistic Method
+
+fviz_nbclust(cluster_df,
+             kmeans,
+             nstart = 25,
+             iter.max = 250,
+             method = "gap_stat") #10 clusters?
+
+#Calihara
+
+fviz_ch <- function(data) {
+  ch <- c()
+  for (i in 2:10) {
+    km <- kmeans(data, i) # perform clustering
+    ch[i] <- calinhara(data, # data
+                       km$cluster, # cluster assignments
+                       cn=max(km$cluster) # total cluster number
+                       )
+  }
+  ch <-ch[2:10]
+  k <- 2:10
+  plot(k, ch,xlab =  "Cluster number k",
+       ylab = "Caliński - Harabasz Score",
+       main = "Caliński - Harabasz Plot", cex.main=1,
+       col = "dodgerblue1", cex = 0.9 ,
+       lty=1 , type="o" , lwd=1, pch=4,
+       bty = "l",
+       las = 1, cex.axis = 0.8, tcl  = -0.2)
+  abline(v=which(ch==max(ch)) + 1, lwd=1, col="red", lty="dashed")
+}
+
+fviz_ch(cluster_df) #2 clusters
+
+#Davies - Bouldin Method
+
+fviz_db <- function(data) {
+  k <- c(2:10)
+  nb <- NbClust(data, min.nc = 2, max.nc = 10, index = "db", method = "kmeans")
+  db <- as.vector(nb$All.index)
+  plot(k, db,xlab =  "Cluster number k",
+       ylab = "Davies-Bouldin Score",
+       main = "Davies-Bouldin Plot", cex.main=1,
+       col = "dodgerblue1", cex = 0.9 ,
+       lty=1 , type="o" , lwd=1, pch=4,
+       bty = "l",
+       las = 1, cex.axis = 0.8, tcl  = -0.2)
+  abline(v=which(db==min(db)) + 1, lwd=1, col="red", lty="dashed")
+}
+
+fviz_db(cluster_df) #9 clusters
+
+#Dunn Index
+
+fviz_dunn <- function(data) {
+  k <- c(2:10)
+  dunnin <- c()
+  for (i in 2:10) {
+    dunnin[i] <- dunn(distance = dist(data), clusters = kmeans(data, i)$cluster)
+  }
+  dunnin <- dunnin[2:10]
+  plot(k, dunnin, xlab =  "Cluster number k",
+       ylab = "Dunn Index",
+       main = "Dunn Plot", cex.main=1,
+       col = "dodgerblue1", cex = 0.9 ,
+       lty=1 , type="o" , lwd=1, pch=4,
+       bty = "l",
+       las = 1, cex.axis = 0.8, tcl  = -0.2)
+  abline(v=which(dunnin==max(dunnin)) + 1, lwd=1, col="red", lty="dashed")
+}
+
+fviz_dunn(cluster_df) #8 clusters
+
+
+```
+
+#k-means with different k numbers
+```{r}
+
+#k = 2
+k2_data <- kmeans(cluster_df, 2, nstart = 25)
+
+k2_cluster <- fviz_cluster(k2_data,# clustering result 
+             data = cluster_df, # data 
+             ellipse.type = "convex", 
+             star.plot = TRUE, 
+             repel = TRUE, 
+             ggtheme = theme_minimal()
+)
+
+
+#k = 5
+k5_data <- kmeans(cluster_df, 5, nstart = 25)
+
+
+k5_cluster <- fviz_cluster(k5_data,# clustering result 
+             data = cluster_df, # data 
+             ellipse.type = "convex", 
+             star.plot = TRUE, 
+             repel = TRUE, 
+             ggtheme = theme_minimal()
+)
+
+#k = 8
+k8_data <- kmeans(cluster_df, 8, nstart = 25)
+
+
+k8_cluster <- fviz_cluster(k8_data,# clustering result 
+             data = cluster_df, # data 
+             ellipse.type = "convex", 
+             star.plot = TRUE, 
+             repel = TRUE, 
+             ggtheme = theme_minimal()
+)
+
+#k = 10
+k10_data <- kmeans(cluster_df, 10, nstart = 25)
+
+
+k10_cluster <- fviz_cluster(k10_data,# clustering result 
+             data = cluster_df, # data 
+             ellipse.type = "convex", 
+             star.plot = TRUE, 
+             repel = TRUE, 
+             ggtheme = theme_minimal()
+)
+
+cowplot::plot_grid(k2_cluster, k5_cluster, k8_cluster, k10_cluster)
+
+```
+#Cluster Characteristic Graph Function
+```{r}
+cluster_graph <- function(df, k_cluster) {
+  temp <- aggregate(df, by=list(cluster = k_cluster$cluster), mean)
+  temp <- reshape2::melt(temp, id = c("cluster"))
+  temp$variable <- factor(temp$variable, levels = c("malf", "nonf", "cg_demand", "cg_stress", "uplift", "pos_aspects_cg", "brief_resilience", "self_esteem"))
+  temp$valence <- ifelse(temp$variable %in% c("malf", "nonf", "cg_demand", "cg_stress"), TRUE, FALSE)
+  ggplot(temp, aes(x = variable, y = value, fill = valence)) +
+    geom_col() +
+    coord_flip() +
+    facet_wrap(~cluster) +
+    theme(legend.position = "none") +
+    geom_hline(yintercept = 0, color = "black")
+}
+
+cluster_graph(cluster_df, k5_data)
+
+
+#fit k=2,3,4,and 5
+#for each one, get frequency of ppl in each cluster for each solution
+#check coding on self-esteem (is high levels = low self esteem?)
+#ideal ~20 in each cluster for power
+#check dr. k's paper on how many clusters to choose
+
+```
+
+#Final
+```{r}
+k3_data <- kmeans(cluster_df, 3, nstart = 25)
+
+
+k3_cluster <- fviz_cluster(k3_data,# clustering result 
+             data = cluster_df, # data 
+             ellipse.type = "convex", 
+             star.plot = TRUE, 
+             repel = TRUE, 
+             ggtheme = theme_minimal()
+)
+
+cluster_graph(cluster_df, k3_data)
+```
+
+#Add clusters to data
+```{r}
+clusters_df <- k3_data$cluster %>% as.data.frame()
+clusters_df$studyid <- rownames(clusters_df)
+colnames(clusters_df)[1] <- "cluster"
+
+fin <- merge(fin, clusters_df, by = "studyid")
+
+fin <- merge(fin, demo, by = "studyid", all.x = TRUE)
+
+fin$rare.disease <- ifelse(fin$disease_cx == "UDP" | fin$disease_cx == "IEM", 1, 0)
+
+#recoding
+fin$hhinc <- ifelse(fin$hhinc == "", NA, fin$hhinc)
+fin[fin$studyid %in% c("144000", "251001", "407001", "710000", "736001"),]$hhinc <- NA
+
+fin$hhinc <- ifelse(fin$hhinc == "$20,000 or less" | fin$hhinc == "$20,001 to $35,000" | fin$hhinc == "$50,001 to $75,000" | fin$hhinc ==  "$35,001 to $50,000", 0, 1) #0 = less than 75 k
+
+fin$educate <- ifelse(fin$educate == "", NA, fin$educate)
+fin[fin$studyid %in% c("106000", "107000", "107001", "109001", "110001", "111000", "117000", "117001", "119000", "119001", "122000", "125000", "126000", "126001", "127000", "129000", "131000", "132000", "133000", "133001", "134000", "134001", "135000", "135001", "139001","141000", "141001", "143000", "143001", "144001", "146000", "149001", "149004", "153000", "154000", "160000", "161000", "177000", "201000", "212000", "215000", "222000", "226002", "228000", "228001", "230000", "239001", "245000", "247000", "250000", "250001","259000", "264000", "265000", "274000", "401000", "406000", "408000", "408001", "410000", "410001", "700001", "702000", "706000", "706001", "710000", "712000", "713000", "715000", "716000", "717001", "718000", "719000", "719001", "722000", "724000", "726000", "731000", "743001", "747000", "755000", "757000", "758000", "760001", "762000", "764000", "764001", "765001", "767000", "770000", "772000", "800000", "800001", "803000"),]$educate <- "Bachelor's Degree"
+
+
+fin$educate <- ifelse(fin$educate == "Elementary" | fin$educate == "Some High School" | fin$educate == "Technical/ Vocational Training" | fin$educate == "GED" | fin$educate == "Middle School" | fin$educate == "High School Graduate" | fin$educate == "Associate Degree/ Some College", 0, 1) #0 = less than bachelors
+
+fin$race <- ifelse(fin$race == "", NA, fin$race)
+fin$race <- ifelse(fin$race == "White", 1, 0) #1 = white
+
+fin$marstat <- ifelse(fin$marstat == "", NA, fin$marstat)
+fin$marstat <- ifelse(fin$marstat == "Married / Living as Married", 1, 0) #0 = not married
+
+#turn into factors
+
+fin[,c(14,15,17,18,20:23)] <- lapply(fin[,c(14,15,17,18,20:23)], as.factor)
+```
+
+#Models
+```{r}
+
+#AIM 1
+mod_Age <- lm(age ~ cluster, data = fin)
+coeftest(mod_Age, vcovHC(mod_Age, type = "HC0")) #not signif
+
+mod_cr_Age <- lm(cr_age_cln ~ cluster, data = fin)
+coeftest(mod_cr_Age, vcovHC(mod_cr_Age, type = "HC0")) #not signif
+
+mod_hhinc <- glm(hhinc ~ cluster, data = fin, family = binomial(link = "logit"))
+coeftest(mod_hhinc, vcovHC(mod_hhinc, type = "HC0")) #not signif
+
+mod_educate <- glm(educate ~ cluster, data = fin, family = binomial(link = "logit"))
+m1 <- coeftest(mod_educate, vcovHC(mod_educate, type = "HC0")) #cluster 3 is more educate
+
+mod_race <- glm(race ~ cluster, data = fin, family = binomial(link = "logit"))
+coeftest(mod_race, vcovHC(mod_race, type = "HC0")) #cluster 3 is more educate
+
+mod_marstat <- glm(marstat ~ cluster, data = fin, family = binomial(link = "logit"))
+coeftest(mod_marstat, vcovHC(mod_marstat, type = "HC0")) #not signif
+
+mod_gender <- glm(gender ~ cluster, data = fin, family = binomial(link = "logit"))
+coeftest(mod_gender, vcovHC(mod_gender, type = "HC0")) #not signif
+
+mod_Rd <- glm(rare.disease ~ cluster, data = fin, family = binomial(link = "logit"))
+m2 <- coeftest(mod_Rd, vcovHC(mod_Rd, type = "HC0"))  #signif, cluster 2 less likely to have + exp
+
+mods <- list(m1, m2) #update this to coeftest later
+stargazer::stargazer(mods,
+                     type = "text", digits = 3,  
+                     star.char = c("*", "**", "***"), 
+                     star.cutoffs = c(.05, .01, .001),
+                     dep.var.labels.include = FALSE,
+                     intercept.bottom = FALSE,
+                     apply.coef = exp, t.auto=F, p.auto=F
+                     )
+
+#AIM 2
+mental_mod <- lm(sf12mental ~ cluster, data = fin)
+coeftest(mental_mod, vcovHC(mental_mod, type = "HC0")) #signif
+
+physical_mod <- lm(sf12physical ~ cluster, data = fin)
+coeftest(physical_mod, vcovHC(physical_mod, type = "HC0")) #signif
+
+cesd_mod <- lm(depression ~ cluster, data = fin)
+coeftest(cesd_mod, vcovHC(cesd_mod, type = "HC0")) #signif
+
+
+```
+
