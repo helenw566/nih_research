@@ -1,0 +1,339 @@
+---
+title: "Longitudinal_Redaction"
+author: "Helen Wang"
+date: "2024-02-23"
+output: html_document
+---
+
+## This document is for redaction purposes for the Longitudinal Caregiving Study. 
+## Refer to SOP FOR REDACTION.docx for instructions
+
+#Library
+```{r}
+library(dplyr) #for %>% pipe and data manipulation
+library(stringr) #for string manipulation
+library(qdap) #to extract text
+```
+
+#File Path
+```{r}
+#set working directory
+setwd("C:/Users/wangh35.NIH/OneDrive - National Institutes of Health/Documents/Caregiving Data/Redaction - Longitudinal") #CHANGE THIS
+
+#set file path location for folder contain family files
+fam.location <- file.path("C:/Users/wangh35.NIH/OneDrive - National Institutes of Health/Documents/Caregiving Data/Redaction - Longitudinal/Family Files") #CHANGE THIS
+
+#set file path location for folder containing raw transcripts
+raw.location <- file.path("C:/Users/wangh35.NIH/OneDrive - National Institutes of Health/Documents/Caregiving Data/Redaction - Longitudinal/Raw Transcripts") #CHANGE THIS
+
+#set file path location for folder containing raw transcripts
+redact.location <- file.path("C:/Users/wangh35.NIH/OneDrive - National Institutes of Health/Documents/Caregiving Data/Redaction - Longitudinal/Redacted Transcripts") #CHANGE THIS
+
+#sets file path location for folder containing Redaction lists
+list.location <- file.path("C:/Users/wangh35.NIH/OneDrive - National Institutes of Health/Documents/Caregiving Data/Redaction - Longitudinal/Redaction Lists") #CHANGE THIS
+```
+
+#Reading in Files
+```{r}
+#gets list of raw transcript filenames
+raw.list <- list.files(raw.location)
+
+#gets list of family file
+fam.list <- list.files(fam.location)
+```
+
+#References
+```{r}
+honorifics <- c("Dr.","Mr.","Ms.","Mrs.","Miss", "Fr.", "Fr", "Doctor", "Dr", "Rev.", "Sr.") #Will NEED TO BE UPDATED AS EXCEPTIONS COME UP
+```
+
+#Redaction Loop
+```{r}
+for (family in 1:length(fam.list)) {
+  
+  #reads in family file 
+  famfile <- read.csv(file.path(fam.location, fam.list[family]), 
+                      stringsAsFactors = FALSE, na.strings = "")
+  
+  #cleans up family file
+  famfile <- famfile[rowSums(is.na(famfile)) != ncol(famfile),] #deletes empty rows
+  famfile <- mutate_if(famfile, is.character, str_trim) #removes whitespace from dataframe
+  famfile[,14:23] <- sapply(famfile[,14:23], tolower) #lowercase, NOTE; NEED TO CHANGE IF FAMILY FILE FORMAT CHANGES
+  
+  #adds in 9 to family file
+  famfile$Network.Member.Name <- gsub("$", "9", famfile$Network.Member.Name)
+  famfile$Network.Member.Name <- gsub(" ", "9 ", famfile$Network.Member.Name)
+  famfile$Network.Member.Name <- gsub("\\.9", ".", famfile$Network.Member.Name) #THIS ASSUMES THAT ALL HONORIFICS END WITH . 
+  
+  #adds in redaction txt col
+  famfile$redaction_text <- NA
+  
+  #gets list of transcript files associated with fam
+  famid <- substr(fam.list[family], 1, 4) #gets family id
+  txt.list <- raw.list[startsWith(raw.list,  famid)] #gets txt files with famid
+  
+  if (length(txt.list) != 0) { #runs loop only if there are txt files for famid
+    
+    #loops over each file in txt.list
+    for (file in 1:length(txt.list)) {
+      
+      #file information - this assumes STUDYID-INTERVIEW TYPE-YEAR-DATE format
+      studyid <- substr(txt.list[file], 1, 10) #gets studyid
+      year <- paste(genXtract(txt.list[file], "-", "-")[3]) #gets year
+      doc <- paste(genXtract(txt.list[file], "-", "-")[2]) #gets file type
+      
+      #filter famfile for appropriate enums
+      enum <- famfile %>% subset(Study.ID == studyid) #filters by studyid
+      
+      if (year == "Y1") { #filters by year
+        enum <- enum %>% subset(Year.1 == "Y") %>% select(Network.Member.Name, Unique.ID,
+                                                          Y1.Relationship.to.Interviewee..Self.,
+                                                          Y1.Relationship.to.CR, redaction_text)
+      } else if (year == "Y2") {
+        enum <- enum %>% subset(Year.2 == "Y") %>% select(Network.Member.Name, Unique.ID,
+                                                          Y2.Relationship.to.Interviewee..Self.,
+                                                          Y2.Relationship.to.CR, redaction_text)
+      } else if (year == "Y3") {
+        enum <- enum %>% subset(Year.3 == "Y") %>% select(Network.Member.Name, Unique.ID,
+                                                          Y3.Relationship.to.Interviewee..Self.,
+                                                          Y3.Relationship.to.CR, redaction_text)
+      } else if (year == "Y4") {
+        enum <- enum %>% subset(Year.4 == "Y") %>% select(Network.Member.Name, Unique.ID,
+                                                          Y4.Relationship.to.Interviewee..Self.,
+                                                          Y4.Relationship.to.CR, redaction_text)
+      } else if (year == "Y5") {
+        enum <- enum %>% subset(Year.5 == "Y") %>% select(Network.Member.Name, Unique.ID,
+                                                          Y5.Relationship.to.Interviewee..Self.,
+                                                          Y5.Relationship.to.CR, redaction_text)
+      }
+      
+      enum_id <- unique(enum$Unique.ID)
+      colnames(enum)[3:4] <- c("P", "R")
+      
+      #create redaction txt
+      for (x in 1:nrow(enum)) {
+          if (is.na(enum$P[x]) & is.na(enum$R[x])) {
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "(no relation)", "]")
+          } else if (is.na(enum$P[x]) & enum$R[x] != "care recipient") {
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "( r's", enum$R[x], ")", "]" )
+          } else if (is.na(enum$R[x]) & enum$P[x] != "self"){
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "( p's", enum$P[x], ")", "]" )
+          } else if (enum$P[x] == "self" & is.na(enum$R[x])) {
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "(", enum$P[x], ")", "]")
+          } else if (is.na(enum$P[x]) & enum$R[x] == "care recipient") {
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "(", enum$R[x], ")", "]")
+          } else if (enum$P[x] == "self" & !is.na(enum$R[x])) {
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "(", enum$P[x], ", r's", enum$R[x], 
+                                            ")", "]")
+          } else if (!is.na(enum$P[x]) & enum$R[x] == "care recipient") {
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "( p's", enum$P[x], ",", enum$R[x], 
+                                            ")", "]")
+          }  else {
+            enum$redaction_text[x] <- paste("[", enum$Unique.ID[x], "( p's", enum$P[x], ", r's", enum$R[x], 
+                                            ")", "]")
+          }
+        }
+      
+      #read files
+      file_lines <- readLines(file.path(raw.location, txt.list[file]), encoding = "UTF-8") #converts to UTF-8
+      file_lines <- gsub("(''')","'",iconv(file_lines,"UTF-8","ASCII", sub="'")) #converts to ASCII and subs out certain special characters
+      
+      list.redact <- data.frame(line = 0, name = "", id = "", file = "") #creates list of redactions
+      
+      for (i in 1:length(enum_id)) { #loops over each enumerant
+        
+        enum_names <- enum[enum$Unique.ID ==  enum_id[i],] #gets all names for unique id
+        enum_names$one_name <- NA
+        
+        #creates different combinations if they have 1) name flags AND 2) a surname 
+        #i.e., John Adams if John2 is a name flag will also do John29 Adams9 in addition to John9 Adam9
+        surnames <- c()
+        first_names <- c()
+        
+        
+        for (opt in 1:nrow(enum_names)) {
+          split_name <- unlist(strsplit(enum_names$Network.Member.Name[opt], " "))
+            
+            #rough check - indicates if its just first name
+            #does not take into account first names that are two names
+          if (length(split_name) == 1) {
+            enum_names$one_name[opt] <- 1 #just first name
+          } else if (length(split_name) == 2 &
+                     !(split_name[1] %in% honorifics) &
+                     nchar(split_name[2]) == 1) {
+            enum_names$one_name[opt] <- 1 #name + initial
+          } else if (length(split_name) == 2 &
+                     !(split_name[1] %in% honorifics)) {
+            enum_names$one_name[opt] <- 2 #full name
+          } else if (length(split_name) == 2 &
+                     (split_name[1] %in% honorifics)) {
+            enum_names$one_name[opt] <- 99 #honorific + name/surname
+          } else if (length(split_name) > 2) {
+            enum_names$one_name[opt] <- 0 #honorific or middle name
+          }
+          
+          #gets surnames
+          if (enum_names$one_name[opt] == 2 |
+              enum_names$one_name[opt] == 0) {
+            last_add <- split_name[length(split_name)]
+            if (!(last_add %in% surnames))
+              surnames <- c(surnames, last_add)
+          }
+          
+          #gets first names
+          if (enum_names$one_name[opt] == 2 |
+              enum_names$one_name[opt] == 1) {
+            first_add <- split_name[1]
+            if (!(first_add %in% first_names)) {
+              first_names <- c(first_names, first_add)
+            } else if (first_add %in% first_names) {
+              next
+            }
+          } else if (enum_names$one_name[opt] == 0) {
+            first_add <- split_name[1]
+            if (!(first_add %in% honorifics)) {
+              if (!(first_add %in% first_names))
+                first_names <- c(first_names, first_add)
+            } else if (first_add %in% honorifics) {
+              first_add <- split_name[2]
+              if (!(first_add %in% first_names))
+                first_names <- c(first_names, first_add)
+            }
+          }
+          
+          #name flag combinations -- need to move up the loop
+          for (last in 1:length(surnames)) {
+            for (first in 1:length(first_names)) {
+              name_add <- str_trim(paste(first_names[first], surnames[last]))
+              if (!(name_add %in% enum_names$Network.Member.Name)) {
+                add <-
+                  c(
+                    name_add,
+                    unique(enum_names$Unique.ID),
+                    unique(enum_names$P),
+                    unique(enum_names$R),
+                    unique(enum_names$redaction_text),
+                    0
+                  )
+                enum_names <- rbind(enum_names, add)
+              }
+            }
+          }  
+        }  
+       
+        
+        #orders name search by longest string
+        enum_names <- enum_names %>% arrange(desc(str_length(Network.Member.Name)), Network.Member.Name) 
+        
+        #CHECK #1
+        #Loops over all the enumerated names, looking for their exact occurrence. 
+        #This will often catch first mentions for those with a first and last name
+        for (name in 1:nrow(enum_names)) { 
+          temp.finds <- grepl(paste(enum_names$Network.Member.Name[name]), file_lines)
+          file_lines <- gsub(paste(enum_names$Network.Member.Name[name]),
+                             paste(enum_names$redaction_text)[name], file_lines,ignore.case=FALSE)
+          #update list of redactions
+          if (length(which(temp.finds == TRUE)) > 0) {
+            add <- data.frame(line = rep(NA, length(which(temp.finds == TRUE))),
+                            name = rep(enum_names$Network.Member.Name[name], length(which(temp.finds == TRUE))),
+                            id = rep(enum_names$Unique.ID[name], length(which(temp.finds == TRUE))),
+                            file = doc)
+            add$line <- which(temp.finds == TRUE)
+            list.redact <- rbind(list.redact, add)
+          }
+        } 
+        
+        
+        #CHECK #2
+        #Now loops over all the enumerated names, but now trying combinations,
+        #such as only first name, etc.
+        #Also checks honorifics, particularly for Doctors.
+        for (name in 1:nrow(enum_names)) {
+          combos <- unlist(strsplit(enum_names$Network.Member.Name[name], 
+                            split = " "))
+          surname_loc <- length(combos)
+          if (nchar(combos[surname_loc]) == 1)
+            break #takes into account that enumerates such as John A will theoretically never be recorded as John or A separately
+          combos_append <- c()
+          
+          #creates vector of possible combinations
+          for (hr in 1:length(honorifics)) {
+            for (n in 1:length(combos)) {
+              append <- paste(honorifics[hr], combos[n])
+              combos_append <- c(combos_append, append)
+            }
+          }
+          
+          combos <- c(combos, combos_append)
+          combos <- combos[-surname_loc] #removes surname
+          if (any(combos %in% honorifics)) {
+            #removes names that are only honorifics
+            combos <- combos[-which(combos %in% honorifics)] 
+          }
+            
+          
+          #redaction
+          for (i in 1:length(combos)) {
+            temp.finds <- grepl(paste(combos[i]), file_lines)
+            file_lines <- gsub(paste(combos[i]),
+                               paste(enum_names$redaction_text)[name],
+                               file_lines,
+                               ignore.case = FALSE)
+            #update list of redactions
+            if (length(which(temp.finds == TRUE)) > 0) {
+              add <- data.frame(
+                line = rep(NA, length(which(temp.finds == TRUE))),
+                name = rep(combos[i], length(which(temp.finds == TRUE))),
+                id = rep(enum_names$Unique.ID[name], 
+                         length(which(temp.finds == TRUE))),
+                file = doc
+              )
+              add$line <- which(temp.finds == TRUE)
+              list.redact <- rbind(list.redact, add)
+            } 
+          } 
+        }
+        
+        #CHECK #3
+        #checks for just last names which remain and SIMPLY REMOVES THEM
+        #This assumes that any first name has been caught at this point
+        #and for some reason the last name remains
+        if (length(surnames) > 0) {
+          for (sur in 1:length(surnames)) {
+            temp.finds <- grepl(paste(surnames[sur]), file_lines)
+            file_lines <- gsub(paste(surnames[sur]), "", file_lines,
+                               ignore.case = FALSE, fixed = TRUE)
+            
+            #update list of redactions
+            if (length(which(temp.finds == TRUE)) > 0) {
+              add <- data.frame(
+                line = rep(NA, length(which(temp.finds == TRUE))),
+                name = rep(surnames[sur], length(which(temp.finds == TRUE))),
+                id = rep(enum_names$Unique.ID[name], length(which(temp.finds == TRUE
+                ))),
+                file = doc
+              )
+              add$line <- which(temp.finds == TRUE)
+              list.redact <- rbind(list.redact, add)
+            }
+          }
+        }
+      } #enumerant
+      
+      #removes empty cell from list.redact
+      list.redact <- list.redact[-1, ]
+      
+      #redacted transcript
+      writeLines(file_lines, con = file.path(redact.location, 
+                                             paste("redacted.", txt.list[file], sep = "")))
+      #redacted list
+      write.csv(list.redact, file = file.path(list.location, 
+                                              paste(studyid,"-", year, "-", doc,
+                                                    "-redactedList.csv", sep = "")),
+                row.names = FALSE)
+    } #file
+  } #file if loop
+} #family
+```
+
+#END
