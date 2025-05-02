@@ -1,0 +1,699 @@
+---
+title: "cg.gender_symp_28Aug2023"
+author: "Helen"
+date: "2023-08-28"
+output: html_document
+---
+
+#Libraries
+```{r}
+library(dplyr)
+library(gtsummary)
+library(lmtest)
+library(sandwich)
+
+
+library(tidyverse)
+library(ggraph)
+library(tidygraph)
+library(networkD3)
+library(network)
+library(sna)
+library(igraph)
+library(graphlayouts)
+library(ggforce)
+library(scatterpie)
+```
+#Files
+```{r}
+#dyads
+dyad_list <- read.csv("~/Caregiving Data/Termeh/cg.jielu_dyad_tracker.csv")
+add_dyad <- data.frame(studyid = c("121000", "121001", "176000", "176001"))
+
+#network data
+master <- read.csv("~/Caregiving Data/Master/cg.master_updated_14Sept2023.csv")
+
+#unique id
+id_list <- read.csv("~/Caregiving Data/Termeh/Termeh_PersonalNet_IDs.csv")
+
+#survey
+svy <- read.csv("~/Caregiving Data/cg.svy_17Feb2022.csv")
+```
+
+#Cleaning
+```{r}
+#getting df with dyad
+dyad_list <- dyad_list %>%
+  subset(r_parent == "parent-dyad") %>%
+  select(studyid) %>%
+  mutate(famid = substr(studyid, 1, 3)) %>%
+  unique()
+colnames(dyad_list)[1] <- "StudyID"
+
+df <- master %>%
+  subset(StudyID %in% dyad_list$StudyID) %>%
+  subset(famid != "149")
+
+df_nq1 <- df %>%
+  subset(NQ1 == TRUE & format_NQ1 == 1) %>%
+  group_by(famid) %>%
+  mutate(n_part = length(unique(StudyID))) %>% 
+  subset(n_part == 2) %>%
+  ungroup()
+
+df_nq1 %>% select(StudyID) %>% unique() %>% nrow() #106 participants, 53 couples w/ NQ1 ()
+df_nq1 %>% select(part_cr_rel_NQ2) %>% table() #including step-parents! all dyads, removed quad
+
+#getting uid for studyid
+id_list <- id_list %>% select(StudyID, Informant_Unique_ID) %>% unique()
+
+id_update <- data.frame(StudyID = c("150000", "159000", "167000", "171000",
+                                    "171001", "181001", "411001",  "730001", 
+                                    "734001", "756000", "756001", "760001", 
+                                    "764000", "764001", "765000", "765001", 
+                                    "768000", "768001", "774000", "774001",
+                                    "121001", "149002", "176000", "740002"),
+                        Informant_Unique_ID = c("i150k001", "i159k000", "i167k004", "i171n000",
+                                      "i171k001", "i181k001", "u411k001", "i730k001",
+                                      "i734k001", "i756n001", "i756n000", "i760k001",
+                                      "i764k000", "i764k001", "i765n000", "i765k004",
+                                      "i768k000", "i768001", "i774k001", "i774k000", 
+                                      "i121k006", "i149k001", "i176k001", "i740k001"))
+id_list <- rbind(id_list, id_update)
+
+df_nq1 <- merge(df_nq1, id_list, by = c("StudyID"), all.x = TRUE)
+df_nq1 <- df_nq1 %>%
+  select(StudyID, Informant_Unique_ID, everything())
+
+#Adding Disease Context
+df_nq1$fam_sub <- substr(df_nq1$famid, 1, 1)
+df_nq1$disease_cx <- NA
+
+for (i in 1:nrow(df_nq1)) {
+  if (df_nq1$fam_sub[i] == 1 | df_nq1$fam_sub[i] == 7) {
+    df_nq1$disease_cx[i] <- "IEM"
+  } else if (df_nq1$fam_sub[i] == 4 | df_nq1$fam_sub[i] == 8) {
+    df_nq1$disease_cx[i] <- "UDP"
+  } else {
+    df_nq1$disease_cx[i] <- "HV"
+  }
+}
+
+#Rare Disease
+df_nq1$rare.disease <- ifelse(df_nq1$disease_cx == "HV", 0, 1) 
+
+#Adding gender
+svy <- svy %>% select(StudyID, gender, cgpt1, cgpt2, cgpt3, contains("cesd"), contains("cgd"), marstat, empstat, race, hhinc, age, educate)
+df_nq1 <- merge(df_nq1, svy, by = "StudyID", all.x = TRUE)
+
+#Check Numbers
+dx_df <- df_nq1 %>% select(StudyID, disease_cx, rare.disease) %>% unique()
+table(dx_df$rare.disease) #16 HV, 90 RD participants (8 HV, 45 RD dyads)
+table(dx_df$disease_cx) #16 HV, 74 IEM, 16 UDP participants (8 HV, 37 IEM, 16 UDP dyads)
+
+#assess if they are enumerated in eachothers networks
+dyad_couple <- df_nq1 %>% select(famid, Informant_Unique_ID) %>% unique()
+
+df_nq1$enumerated <- NA
+df_nq1$Spouse_Unique_ID <- NA
+
+for (i in 1:length(unique(df_nq1$StudyID))) {
+  id <- unique(df_nq1$StudyID)[i]
+  id_list <- df_nq1[df_nq1$StudyID == id,]
+  fam <- unique(id_list$famid)
+  partner_id <- dyad_couple$Informant_Unique_ID[dyad_couple$famid == fam & 
+                dyad_couple$Informant_Unique_ID != unique(id_list$Informant_Unique_ID)]
+  df_nq1[df_nq1$StudyID == id,]$Spouse_Unique_ID <- partner_id
+  check <- sum(id_list$unique_id %in% partner_id)
+  df_nq1[df_nq1$StudyID == id,]$enumerated <- check
+}
+
+#recode nq1 q
+for (i in 76:81) { #satisf q
+  for (row in 1:nrow(df_nq1)) {
+    cell <- df_nq1[row, i]
+    if (is.na(cell)) {
+      next
+    } else if (cell == "999" | cell == "Missing" | cell == "N/A") {
+      df_nq1[row, i] <- NA
+    }
+  }
+}  
+
+#checks
+df_nq1 %>% 
+  select(StudyID, enumerated) %>% 
+  unique() %>% 
+  select(enumerated) %>% 
+  table() #1 person didn't enumerate their spouse spouse but 105 others did
+
+df_nq1 %>% 
+  subset(unique_id == Informant_Unique_ID | unique_id == Spouse_Unique_ID) %>% 
+  select(StudyID, Informant_Unique_ID, Spouse_Unique_ID) %>% 
+  group_by(StudyID) %>% 
+  mutate(n_fam = n()) %>% 
+  ungroup() %>% 
+  select(n_fam) %>% 
+  table() #everyone enumerated themselves 
+
+temp <- df_nq1 %>%  
+  subset((unique_id == Informant_Unique_ID | unique_id == Spouse_Unique_ID) & 
+           rare.disease == 1) %>% 
+  select(StudyID, Informant_Unique_ID, Spouse_Unique_ID, gender, rare.disease, ends_with("NQ1"))
+
+data.frame(colSums(is.na(temp))) %>% View()
+
+#gender checks
+df_nq1 %>%
+  select(StudyID, gender, part_cr_rel_NQ2) %>%
+  unique() %>%
+  select(-StudyID) %>% table() #all correct I think?
+
+df_nq1 %>%
+  select(StudyID, gender, part_cr_rel_NQ2) %>%
+  unique() %>%
+  select(gender) %>% 
+  is.na() %>%
+  table() #three missing
+
+df_nq1 %>%
+  select(StudyID, gender, part_cr_rel_NQ2) %>%
+  unique() %>%
+  subset(is.na(gender))
+
+df_nq1$gender <- ifelse(df_nq1$StudyID == "105001", 0, df_nq1$gender)
+df_nq1$gender <- ifelse(df_nq1$StudyID == "115001", 0, df_nq1$gender)
+df_nq1$gender <- ifelse(df_nq1$StudyID == "138000", 1, df_nq1$gender)
+
+#filter for RD
+df_nq1 <- df_nq1 %>%
+  subset(rare.disease == 1) 
+
+```
+
+#Aggregation
+```{r}
+#recode cesd
+df_nq1$cesd3 <- recode(df_nq1$cesd3, '0' = 3, '1' = 2, '2' = 1, '3' = 0)
+df_nq1$cesd7 <- recode(df_nq1$cesd7, '0' = 3, '1' = 2, '2' = 1, '3' = 0)
+
+
+#aggregation
+cg_dyad <- df_nq1 %>%
+  select(StudyID, gender, DirectCare_NQ1, DecisionMaking_NQ1, SupportPt_NQ1, DirectCare_Satisfaction_NQ1, DecisionMaking_Satisfaction_NQ1, SupportPt_Satisfaction_NQ1) %>%
+  group_by(StudyID) %>%
+  mutate(network_size = n(),
+         dc = sum(as.numeric(DirectCare_NQ1), na.rm = TRUE)/network_size,
+         dm = sum(as.numeric(DecisionMaking_NQ1), na.rm = TRUE)/network_size,
+         sp = sum(as.numeric(SupportPt_NQ1), na.rm = TRUE)/network_size,
+         dc_satisf = mean(as.numeric(DirectCare_Satisfaction_NQ1), na.rm = TRUE),
+         dm_satisf = mean(as.numeric(DecisionMaking_Satisfaction_NQ1), na.rm = TRUE),
+         sp_satisf = mean(as.numeric(SupportPt_Satisfaction_NQ1), na.rm = TRUE)) %>%
+  select(StudyID, gender, dc, dm, sp, dc_satisf, dm_satisf, sp_satisf, network_size) %>% 
+  ungroup() %>% 
+  unique()
+
+fin <- df_nq1 %>%
+  select(famid, StudyID, Informant_Unique_ID, gender, part_cr_rel_NQ2, 
+         rare.disease, disease_cx, unique_id, Spouse_Unique_ID,  
+         DirectCare_NQ1, DirectCare_Satisfaction_NQ1, DecisionMaking_NQ1,
+         DecisionMaking_Satisfaction_NQ1, SupportPt_NQ1, SupportPt_Satisfaction_NQ1, 
+         cgpt1, cgpt2, cgpt3, contains("cesd"), contains("cgd"), marstat, 
+         empstat, hhinc, race, age, educate, enumerated) %>%
+  mutate(cgd_mean = rowMeans(select(., contains("cgd")), na.rm = TRUE),
+         cesd_mean = rowMeans(select(., contains("cesd")), na.rm = TRUE)) %>%
+  group_by(StudyID) %>%
+  mutate(network_size = n(),
+         dc = sum(as.numeric(DirectCare_NQ1), na.rm = TRUE)/network_size,
+         dm = sum(as.numeric(DecisionMaking_NQ1), na.rm = TRUE)/network_size,
+         sp = sum(as.numeric(SupportPt_NQ1), na.rm = TRUE)/network_size,
+         dc_satisf = mean(as.numeric(DirectCare_Satisfaction_NQ1), na.rm = TRUE),
+         dm_satisf = mean(as.numeric(DecisionMaking_Satisfaction_NQ1), na.rm = TRUE),
+         sp_satisf = mean(as.numeric(SupportPt_Satisfaction_NQ1), na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(-c(unique_id, DirectCare_NQ1, DirectCare_Satisfaction_NQ1, 
+            DecisionMaking_NQ1,DecisionMaking_Satisfaction_NQ1, 
+            SupportPt_NQ1, SupportPt_Satisfaction_NQ1)) %>%
+  unique()
+
+fin$cesd_mean <- ifelse(is.nan(fin$cesd_mean), NA, fin$cesd_mean)
+  
+
+```
+
+#Co-variates
+```{r}
+#race
+fin <- fin %>% 
+  mutate(across(race, ~replace(.,. == "", NA)))
+
+fin$race <- ifelse(fin$race == "White", 1, 0) #1 = white, 0 = POC
+fin$race <- as.factor(fin$race)
+
+#marstat
+fin <- fin %>% 
+  mutate(across(marstat, ~replace(.,. == "", NA)))
+fin$marstat <- ifelse(fin$marstat == "Married / Living as Married", 1, 0) # 1= married, 0 = not married
+fin$marstat <- as.factor(fin$marstat)
+
+#educate
+fin <- fin %>% 
+  mutate(across(educate, ~replace(.,. == "", NA)))
+fin$educate <- ifelse(fin$educate == "Post-Graduate Degree" | fin$educate == "Bachelor’s Degree", 1, 0)
+fin$educate <- as.factor(fin$educate) #1 = bachelors and above, 0 = below bachelors
+
+#empstat
+fin <- fin %>% 
+  mutate(across(empstat, ~replace(.,. == "", NA)))
+
+fin$empstat <- ifelse(fin$empstat == "Not employed (including student or homemaker)" | fin$empstat == "Retired", 0, 1) #0 = not employed, 1 = employed
+
+fin$empstat <- as.factor(fin$empstat)
+
+#hhinc
+fin <- fin %>% 
+  mutate(across(hhinc, ~replace(.,. == "", NA)))
+fin$hhinc <- ifelse(fin$hhinc == "Don’t know", NA, fin$hhinc)
+fin$hhinc <- factor(fin$hhinc, levels = c( "$20,000 or less", 
+                                           "$20,001 to $35,000", 
+                                           "$35,001 to $50,000", 
+                                           "$50,001 to $75,000",
+                                           "$75,001 to $100,000", 
+                                           "$100,001 to 125,000", 
+                                           "$125,001 to 150,000", 
+                                           "$150,001 to 200,000",
+                                           "Greater than $200,000"))
+
+fin$hhinc <- ifelse(fin$hhinc == "$20,000 or less" | 
+                      fin$hhinc == "$20,001 to $35,000" | 
+                      fin$hhinc == "$35,001 to $50,000", 0, 1) 
+#0 = "Low Income (<= $50,000)", 1 = "High Income (> $50,000)"
+fin$hhinc <- as.factor(fin$hhinc)
+
+#Covariate Testing
+fin %>%
+  select(StudyID, gender, empstat, hhinc, race, age, educate) %>%
+  unique() %>%
+  select(-StudyID) %>%
+  tbl_summary(by = gender) %>%
+  add_p(all_categorical() ~ "fisher.test") #empstat is signif
+```
+
+#Aim 1: Gender on Caregiving Roles
+```{r}
+hist(fin$cgpt1)
+shapiro.test(fin$cgpt1)
+hist(fin$cgpt2)
+shapiro.test(fin$cgpt2)
+hist(fin$cgpt3)
+shapiro.test(fin$cgpt3) #definitely poisson for all of them
+
+#Support 1
+mod1_support <- glm(cgpt1 ~ gender + empstat, 
+                    fin, 
+                    family = poisson(link = "log"))
+
+lm1 <- coeftest(mod1_support, vcovHC(mod1_support, type = "HC0")) 
+
+#DC 2
+mod2_dc <- glm(cgpt2 ~ gender + empstat, 
+                    fin, 
+                    family = poisson(link = "log"))
+
+lm2 <- coeftest(mod2_dc, vcovHC(mod2_dc, type = "HC0")) 
+#Decision Making 3
+mod3_dm <- glm(cgpt3 ~ gender + empstat, 
+                    fin, 
+                    family = poisson(link = "log"))
+
+lm3 <- coeftest(mod3_dm, vcovHC(mod3_dm, type = "HC0")) #Significant Only for Decision Making
+
+stargazer::stargazer(lm1, lm2, lm3, 
+                     type = "text",
+                      column.labels = c("Support", "Direct Care", "Decision Making"))
+```
+
+#Aim 2: Network Support Utilization by Gender
+```{r}
+hist(fin$dc)
+shapiro.test(fin$dc)
+hist(log(fin$sp))
+shapiro.test(log(fin$sp)) #normal after log
+hist(log(fin$dm))
+shapiro.test(log(fin$dm)) #normal after log
+
+#Support
+mod1_nS <- lm(log(sp) ~ gender + empstat,  
+          data = fin) 
+
+lm1_nS <- coeftest(mod1_nS, vcovHC(mod1_nS, type = "HC0")) 
+
+#DC
+mod2_nS <- lm(dc ~ gender + empstat,  
+          data = fin) 
+
+lm2_nS <- coeftest(mod1_nS, vcovHC(mod1_nS, type = "HC0"))
+
+#Decision Making
+mod3_nS <- lm(log(dm) ~ gender + empstat,  
+          data = fin) 
+
+lm3_nS <- coeftest(mod3_nS, vcovHC(mod3_nS, type = "HC0")) 
+
+#Not significant; Women and Men do not differ in type of CG support
+
+stargazer::stargazer(lm1_nS, lm2_nS, lm3_nS, 
+                     type = "text",
+                      column.labels = c("Support", "Direct Care", "Decision Making"))
+
+
+fin %>%
+  select(gender, dc, dm, sp) %>%
+  tbl_summary(by = gender, 
+              statistic = list(
+      all_continuous() ~ "{mean} ({sd})"
+    ) )
+
+fin %>%
+  select(dc, dm, sp) %>%
+  tbl_summary(
+              statistic = list(
+      all_continuous() ~ "{mean} ({sd})"
+    ) )
+```
+#Network Size
+```{r}
+hist(log(fin$network_size))
+shapiro.test(log(fin$network_size))
+
+nS_mod <- lm(log(network_size) ~ gender + empstat,  
+          data = fin) 
+
+lm_NS <- coeftest(nS_mod, vcovHC(nS_mod, type = "HC0")) #Signif 
+lm_NS
+```
+#Satisfaction
+```{r}
+#Support
+mod1_nS_satisf <- lm(sp_satisf ~ gender + empstat,  
+          data = fin) 
+
+lm1_nS_satisf <- coeftest(mod1_nS_satisf, vcovHC(mod1_nS_satisf, type = "HC0")) 
+
+#DC
+mod2_nS_satisf <- lm(dc_satisf ~ gender + empstat,  
+          data = fin) 
+
+lm2_nS_satisf <- coeftest(mod1_nS_satisf, vcovHC(mod1_nS_satisf, type = "HC0"))
+
+#Decision Making
+mod3_nS_satisf <- lm(dm_satisf ~ gender + empstat,  
+          data = fin) 
+
+lm3_nS_satisf <- coeftest(mod3_nS_satisf, vcovHC(mod3_nS_satisf, type = "HC0")) 
+
+#NOT SIGNIFICANT 
+```
+
+#Perception
+```{r}
+dyad_census <- df_nq1 %>%  
+  subset(unique_id == Spouse_Unique_ID | unique_id == Informant_Unique_ID) %>% 
+  select(famid, StudyID, Informant_Unique_ID, Spouse_Unique_ID, unique_id, gender, DirectCare_NQ1, DecisionMaking_NQ1, SupportPt_NQ1, contains("cesd"), contains("cgd")) %>%
+  mutate(cgd_mean = rowMeans(select(., contains("cgd")), na.rm = TRUE),
+         cesd_mean = rowMeans(select(., contains("cesd")), na.rm = TRUE)) 
+#It's 179 because one person didn't enumerate their spouse
+
+female_part <- dyad_census %>%
+  subset(gender == 1)
+
+colnames(female_part)[2:length(colnames(female_part))] <- paste0(colnames(female_part)[2:length(colnames(female_part))], "_f")
+
+male_part <- dyad_census %>%
+  subset(gender == 0)
+
+colnames(male_part)[2:length(colnames(male_part))] <- paste0(colnames(male_part)[2:length(colnames(male_part))], "_m")
+
+dyad_df <- merge(male_part, female_part, by.x = c("famid", "unique_id_m"), 
+                 by.y = c("famid", "unique_id_f"), all.y = TRUE)
+
+#census!
+dyad_df$dc_census <- ifelse(dyad_df$DirectCare_NQ1_f == dyad_df$DirectCare_NQ1_m, 1, 0)
+#dyad_df$dc_census[is.na(dyad_df$dc_census)] <- 0
+
+dyad_df$dm_census <- ifelse(dyad_df$DecisionMaking_NQ1_f == dyad_df$DecisionMaking_NQ1_m, 1, 0)
+#dyad_df$dm_census[is.na(dyad_df$dm_census)] <- 0
+
+dyad_df$sp_census <- ifelse(dyad_df$SupportPt_NQ1_f == dyad_df$SupportPt_NQ1_m, 1, 0)
+#dyad_df$sp_census[is.na(dyad_df$sp_census)] <- 0
+
+#nonconcensus only present in DM
+dyad_df$census <- ifelse(dyad_df$dm_census == 1, 1, 0)
+dyad_df$census[is.na(dyad_df$census)] <- 1
+
+#distribution
+hist(log(fin$cesd_mean))
+fin$cesd_mean_log <- log(fin$cesd_mean)
+fin$cesd_mean_log <- ifelse(is.infinite(fin$cesd_mean_log), NA, fin$cesd_mean_log)
+shapiro.test(fin$cesd_mean_log) #not normal
+
+fin$cesd_dich <- ifelse(fin$cesd_mean >= 1.1, 1, 0) #1 = depressed
+
+#merge
+census_dat <- dyad_df %>% select(StudyID_f, census)
+colnames(census_dat)[1] <- "StudyID"
+fin <- merge(fin, census_dat, by = "StudyID")
+
+dyad_df %>% subset(famid %in% c(115, 134, 139)) %>% select(famid, unique_id_m, Informant_Unique_ID_f, Informant_Unique_ID_m, DecisionMaking_NQ1_f, DecisionMaking_NQ1_m) %>% View()
+
+#covariates
+fin %>%
+  select(StudyID, census, gender, empstat, hhinc, race, age, educate) %>%
+  unique() %>%
+  select(-StudyID) %>%
+  tbl_summary(by = census) %>%
+  add_p(all_categorical() ~ "fisher.test") 
+
+chisq.test(fin$cesd_dich, fin$census, simulate.p.value = TRUE)
+
+mod_cesd <- lm(cesd_mean_log ~ census,  
+                data = fin) 
+
+mod_cesd_m <- coeftest(mod_cesd, vcovHC(mod_cesd, type = "HC0"))
+mod_cesd_m
+```
+
+#Graph
+```{r}
+fam115 <- df_nq1 %>%
+  subset(famid == "139")
+
+fam115 <- fam115 %>%
+  select(Informant_Unique_ID, unique_id, gender, DecisionMaking_NQ1)
+
+fam115$DecisionMaking_NQ1 <- ifelse(fam115$DecisionMaking_NQ1 == 1, "Yes", "No")
+
+fam115$DecisionMaking_NQ1[is.na(fam115$DecisionMaking_NQ1)] <- "No"
+
+#nodes
+nodes_115_df <- data.frame(name = unique(fam115$unique_id))
+nodes_115_df$type <- NA
+for (i in 1:nrow(nodes_115_df)) {
+  if (nodes_115_df$name[i] == "i139k000") {
+    nodes_115_df$type[i] <- "Woman"
+  } else if (nodes_115_df$name[i] == "i139k001")  {
+    nodes_115_df$type[i] <- "Man"
+  } else {
+    nodes_115_df$type[i] <- "Alter"
+  }
+}
+
+#links
+links_115_df <- data.frame(src = fam115$Informant_Unique_ID,
+                           target = fam115$unique_id,
+                           decision_making = fam115$DecisionMaking_NQ1,
+                           gender = fam115$gender)
+
+links_115_df <- links_115_df %>%
+  filter(!(src == target)) #removes links that connect to itself
+
+links_115_df <- unique(links_115_df[c("src", "target", "decision_making", "gender")]) #remove duplicate links
+links_115_df$decision_making_col <- ifelse(links_115_df$decision_making == "Yes", "green", "grey")
+
+#ggraph version
+
+fam115_net <- tbl_graph(nodes = nodes_115_df,
+                        edges = links_115_df,
+                        directed = TRUE)
+
+
+network_115_graph <- ggraph(fam115_net, layout = "stress") +
+  geom_edge_parallel(aes(col = decision_making), 
+                      width = 1,
+                arrow = arrow(type = "closed", 
+                              length = unit(2, 'mm'))) +
+  geom_node_point(aes(col = type), 
+                  size = 8,
+                  show.legend = FALSE,
+                  alpha = 0.5)  + 
+  scale_color_manual(values = c("Man" = "darkblue", 
+                                "Woman" = "darkviolet",
+                                "Alter" = "#03716C")) +
+  scale_edge_color_manual(values = c("Yes" = "#7CD6BE",
+                                     "No" = "darkgrey"),
+                          name = "Decision Making") +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+
+show(network_115_graph)
+```
+
+#Scatterpie (F)
+
+```{r}
+
+fam139_F <- df_nq1 %>%
+  subset(Informant_Unique_ID == "i139k000")
+
+fam139_F <- fam139_F %>%
+  select(Informant_Unique_ID, unique_id, gender, DecisionMaking_NQ1, DirectCare_NQ1, SupportPt_NQ1)
+
+#nodes
+nodes_139_F_df <- data.frame(name = unique(fam139_F$unique_id),
+                           `Decision Making` =  as.numeric(fam139_F$DecisionMaking_NQ1),
+                           `Direct Care` =  as.numeric(fam139_F$DirectCare_NQ1),
+                           `Support` =  as.numeric(fam139_F$SupportPt_NQ1))
+
+
+nodes_139_F_df$type <- NA
+for (i in 1:nrow(nodes_139_F_df)) {
+  if (nodes_139_F_df$name[i] == "i139k000") {
+    nodes_139_F_df$type[i] <- "Woman"
+  } else if (nodes_139_F_df$name[i] == "i139k001")  {
+    nodes_139_F_df$type[i] <- "Man"
+  } else {
+    nodes_139_F_df$type[i] <- "Alter"
+  }
+}
+
+nodes_139_F_df$empty <- NA
+nodes_139_F_df$empty <- ifelse(is.na(nodes_139_F_df$Decision.Making) & is.na(nodes_139_F_df$Direct.Care) & is.na(nodes_139_F_df$Support), 1, 0)
+nodes_139_F_df$Decision.Making[is.na(nodes_139_F_df$Decision.Making)] <- 0
+nodes_139_F_df$Direct.Care[is.na(nodes_139_F_df$Direct.Care)] <- 0
+nodes_139_F_df$Support[is.na(nodes_139_F_df$Support)] <- 0
+  
+nodes_139_F_df[nodes_139_F_df$name == "i139k018",]$empty <- 1
+
+#links
+links_139_F_df <- data.frame(src = fam139_F$Informant_Unique_ID,
+                           target = fam139_F$unique_id
+)
+
+links_139_F_df <- links_139_F_df %>%
+  filter(!(src == target)) #removes links that connect to itself
+
+links_139_F_df <- unique(links_139_F_df[c("src", "target")]) #remove duplicate links
+
+g <- graph_from_data_frame(links_139_F_df, directed = TRUE, vertices = nodes_139_F_df)
+
+xy <- layout_with_stress(g)
+V(g)$x <- xy[, 1]
+V(g)$y <- xy[, 2]
+
+F_graph <- ggraph(g, "manual", x = V(g)$x, y = V(g)$y) +
+  geom_edge_link() +
+  geom_scatterpie(
+    cols = c("Direct.Care", "Decision.Making", "Support", "empty"),
+    data = as_data_frame(g, "vertices"),
+    colour =  "black",
+    pie_scale = 3
+  ) +
+  coord_fixed() +
+  theme_void() +
+  scale_fill_manual(values = c("#7AF2EC", "#7CD6BE","#03716C", "#DCDDE0"),
+                    name = "")  +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        text = element_text(size=50)) +
+  labs(title = "Women (Mother)")
+```
+
+#temp
+```{r}
+fam139_M <- df_nq1 %>%
+  subset(Informant_Unique_ID == "i139k001")
+
+fam139_M <- fam139_M %>%
+  select(Informant_Unique_ID, unique_id, gender, DecisionMaking_NQ1, DirectCare_NQ1, SupportPt_NQ1)
+
+#nodes
+nodes_139_M_df <- data.frame(name = unique(fam139_M$unique_id),
+                           `Decision Making` =  as.numeric(fam139_M$DecisionMaking_NQ1),
+                           `Direct Care` =  as.numeric(fam139_M$DirectCare_NQ1),
+                           `Support` =  as.numeric(fam139_M$SupportPt_NQ1))
+nodes_139_M_df$type <- NA
+for (i in 1:nrow(nodes_139_M_df)) {
+  if (nodes_139_M_df$name[i] == "i139k000") {
+    nodes_139_M_df$type[i] <- "Woman"
+  } else if (nodes_139_M_df$name[i] == "i139k001")  {
+    nodes_139_M_df$type[i] <- "Man"
+  } else {
+    nodes_139_M_df$type[i] <- "Alter"
+  }
+}
+
+nodes_139_M_df$empty <- NA
+nodes_139_M_df$empty <- ifelse(is.na(nodes_139_M_df$Decision.Making) & is.na(nodes_139_M_df$Direct.Care) & is.na(nodes_139_M_df$Support), 1, 0)
+nodes_139_M_df[nodes_139_M_df$name == "i139k002" | nodes_139_M_df$name == "i139n007",]$empty <- 1
+
+nodes_139_M_df$Decision.Making[is.na(nodes_139_M_df$Decision.Making)] <- 0
+nodes_139_M_df$Direct.Care[is.na(nodes_139_M_df$Direct.Care)] <- 0
+nodes_139_M_df$Support[is.na(nodes_139_M_df$Support)] <- 0
+
+#links
+links_139_M_df <- data.frame(src = fam139_M$Informant_Unique_ID,
+                           target = fam139_M$unique_id
+)
+
+links_139_M_df <- links_139_M_df %>%
+  filter(!(src == target)) #removes links that connect to itself
+
+links_139_M_df <- unique(links_139_M_df[c("src", "target")]) #remove duplicate links
+
+p <- graph_from_data_frame(links_139_M_df, directed = TRUE, vertices = nodes_139_M_df)
+
+xy <- layout_with_stress(p)
+V(p)$x <- xy[, 1]
+V(p)$y <- xy[, 2]
+
+M_graph <- ggraph(p, "manual", x = V(p)$x, y = V(p)$y) +
+  geom_edge_link() +
+  geom_scatterpie(
+    cols = c("Direct.Care", "Decision.Making", "Support", "empty"),
+    data = as_data_frame(p, "vertices"),
+    colour =  "black",
+    pie_scale = 3
+  ) +
+  coord_fixed() +
+  theme_void() +
+  scale_fill_manual(values = c("#7AF2EC", "#7CD6BE","#03716C", "#DCDDE0"),
+                    name = "")  +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        text = element_text(size=50)) +
+  labs(title = "Men (Father)")
+
+net_graph <- cowplot::plot_grid(F_graph, M_graph, ncol = 2)
+net_graph
+
+ggsave(
+    filename = "net_graph.png",
+    plot = net_graph,
+    width = 27.76,
+    height = 11.71,
+    units = "in",
+    dpi = 300
+  )  
+```
+

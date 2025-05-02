@@ -1,0 +1,1623 @@
+---
+title: "sunbelt_data"
+author: "Helen"
+date: "2023-06-05"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+#Library
+```{r}
+library(dplyr)
+library(ggplot2)
+library(modelsummary)
+library(gtsummary)
+library(lmtest)
+library(sandwich)
+```
+
+#Files
+```{r}
+#reading in data
+termeh_df <- read.csv("~/Caregiving Data/Termeh/Termeh_PersonalNet.csv")
+
+#demographics
+survey <- read.csv("~/Caregiving Data/cg.svy_17Feb2022.csv")
+survey_cov <- survey %>% select(StudyID, marstat, gender)
+
+#sender IDs
+id_list <- read.csv("~/Caregiving Data/Termeh/Termeh_PersonalNet_IDs.csv")
+id_list <- id_list %>% select(StudyID, Informant_Unique_ID) %>% unique()
+
+id_update <- data.frame(StudyID = c("150000", "159000", "167000", "171000",
+                                    "171001", "181001", "411001",  "730001", 
+                                    "734001", "756000", "756001", "760001", 
+                                    "764000", "764001", "765000", "765001", 
+                                    "768000", "768001", "774000", "774001",
+                                    "121001", "149002", "176000", "740002"),
+                        Informant_Unique_ID = c("i150k001", "i159k000", "i167k004", "i171n000",
+                                      "i171k001", "i181k001", "u411k001", "i730k001",
+                                      "i734k001", "i756n001", "i756n000", "i760k001",
+                                      "i764k000", "i764k001", "i765n000", "i765k004",
+                                      "i768k000", "i768001", "i774k001", "i774k000", 
+                                      "i121k006", "i149k001", "i176k001", "i740k001"))
+id_list <- rbind(id_list, id_update)
+
+#filling in missing relationships
+
+termeh_df[termeh_df$StudyID == "121001",]$part_cr_rel_NQ2 <- "father"
+termeh_df[termeh_df$StudyID == "176000",]$part_cr_rel_NQ2 <- "mother"
+
+#droping quad
+termeh_df <- termeh_df[termeh_df$famid != "149",]
+
+#list of dyads
+dyad_list <- unique(termeh_df$famid)
+
+#merging files
+termeh_df <- merge(termeh_df, survey_cov, by = "StudyID", all.x = TRUE)
+termeh_df <- merge(termeh_df, id_list, by = "StudyID", all.x = TRUE)
+
+```
+
+#Shared Partners + Unique Partners
+```{r}
+termeh_df$dyad_part <- ifelse(termeh_df$part_cr_rel_NQ2 == "mother" | 
+                              termeh_df$part_cr_rel_NQ2 == "step-mother", 
+                              1, 0) # 1 = mom, 0 = dad
+
+#var number of shared partners
+termeh_df$shared_num <- NA
+termeh_df$mom_unique_num <- NA
+termeh_df$dad_unique_num <- NA
+termeh_df$sp <- NA
+termeh_df$up <- NA
+
+#loop to get number of shared partners
+
+for (i in 1:length(dyad_list)) {
+  dyad <- dyad_list[i]
+  mom_list <- termeh_df[termeh_df$famid == dyad & 
+                        termeh_df$dyad_part == "1",]$unique_id
+  dad_list <- termeh_df[termeh_df$famid == dyad & 
+                        termeh_df$dyad_part == "0",]$unique_id
+  termeh_df$shared_num[which(termeh_df$famid == dyad)] <- sum(dad_list 
+                                                              %in% mom_list) 
+                                                      #gets listed of shared
+  shared_id <- dad_list[dad_list %in% mom_list]
+  termeh_df$sp[which(termeh_df$famid == dyad & 
+                                   termeh_df$unique_id %in% shared_id)] <- 1  
+                              #indicates if network member is a shared partner
+  termeh_df$mom_unique_num[which(termeh_df$famid == dyad & 
+              termeh_df$dyad_part == 1)] <- length(setdiff(mom_list, dad_list))
+  termeh_df$up[which(termeh_df$famid == dyad &
+                       termeh_df$unique_id %in% setdiff(mom_list, dad_list))] <- 1
+                        #indiciates if network member is unique partner for mom
+  termeh_df$dad_unique_num[which(termeh_df$famid == dyad & 
+              termeh_df$dyad_part == 0)] <- length(setdiff(dad_list, mom_list))
+  termeh_df$up[which(termeh_df$famid == dyad &
+                       termeh_df$unique_id %in% setdiff(dad_list, mom_list))] <- 1
+                       #indiciates if network member is unique partner for dad
+}
+
+termeh_df$unique_part <- coalesce(termeh_df$mom_unique_num, 
+                                  termeh_df$dad_unique_num) #collapses unique num
+
+termeh_df$sp[is.na(termeh_df$sp)] <- 0
+termeh_df$up[is.na(termeh_df$up)] <- 0
+
+#computes Network Size
+termeh_df <- termeh_df %>%
+  group_by(StudyID) %>%
+  mutate(network.size = n()) %>%
+  ungroup() %>%
+  group_by(famid) %>%
+  mutate(unique_duo = sum(unique_part)) %>%
+  ungroup() %>%
+  mutate(network.size_duo = shared_num + unique_duo)
+
+#adds percentage of shared partners and unique partners
+termeh_df <- termeh_df %>%
+  mutate(mom_unique_num_percent = mom_unique_num/network.size *100,
+         dad_unique_num_percent = dad_unique_num/network.size*100,
+         shared_num_percent = shared_num/network.size*100)
+termeh_df <- termeh_df %>%
+  mutate(unique_num_percent = coalesce(mom_unique_num_percent, 
+                                       dad_unique_num_percent))
+
+#MNU
+
+malf_col <- c("q8_NQ2", "q11_NQ2", "q12_NQ2", "q13_NQ2", "q16_NQ2", "q17_NQ2", "q5_NQ2")
+nonf_col <- c("q3_NQ2", "q10_NQ2", "q14_NQ2", "q36_NQ2")
+uplift_col <- c("q2_NQ2", "q6_NQ2", "q7_NQ2", "q9_NQ2", "q13_NQ2", "q18_NQ2", "q19_NQ2", "q35_NQ2")
+
+termeh_df <- termeh_df %>%
+  mutate(malf_score = select(., all_of(malf_col)) %>% rowMeans(na.rm = TRUE),
+         nonf_score = select(., all_of(nonf_col)) %>% rowMeans(na.rm = TRUE),
+         uplift_score = select(., all_of(uplift_col)) %>% rowMeans(na.rm = TRUE))
+
+termeh_df$malf <- ifelse(termeh_df$malf_score > 0, 1, 0)
+termeh_df$nonf <- ifelse(termeh_df$nonf_score > 0, 1, 0)
+termeh_df$uplift <- ifelse(termeh_df$uplift_score > 0, 1, 0)
+
+termeh_df %>%
+  group_by(famid)
+
+#gender checks
+table(termeh_df$dyad_part == termeh_df$gender)
+termeh_df[termeh_df$StudyID == "181000",]$gender <- 1 #corrects gender here
+
+#subset for couples who didn't do NQ2
+part_list <- unique(termeh_df$Informant_Unique_ID)
+
+termeh_df$NQ2 <- ifelse(is.na(termeh_df$NQ2), FALSE, TRUE)
+
+test<- termeh_df %>%
+  select(rare.disease, NQ2, famid) %>%
+  unique() #gets it by dyad
+table(test$NQ2, test$rare.disease)
+fisher.test(test$rare.disease, test$NQ2) #no significant difference in cg context x NQ2 completion
+
+drop_list <- unique(termeh_df[(termeh_df$unique_id %in% part_list | termeh_df$Informant_Unique_ID %in% part_list) & termeh_df$NQ2 == FALSE,]$famid)
+
+termeh_df <- termeh_df %>%
+  subset(!(famid %in% drop_list))
+
+#number of dyads by disease context
+temp <- termeh_df %>% select(famid, disease_cx) %>% unique()
+table(temp$disease_cx)
+
+#uniques
+termeh_df$unique_nonf <- NA
+
+for (i in 1:length(unique(termeh_df$famid))) {
+  fam <- termeh_df[termeh_df$famid == unique(termeh_df$famid)[i],]
+  uni_nonf <- fam %>% subset(up == 1 & nonf == 1)
+  termeh_df[termeh_df$famid == unique(termeh_df$famid)[i],]$unique_nonf <- nrow(uni_nonf)
+}
+
+termeh_df$unique_malf <- NA
+
+for (i in 1:length(unique(termeh_df$famid))) {
+  fam <- termeh_df[termeh_df$famid == unique(termeh_df$famid)[i],]
+  uni_malf <- fam %>% subset(up == 1 & malf == 1)
+  termeh_df[termeh_df$famid == unique(termeh_df$famid)[i],]$unique_malf <- nrow(uni_malf)
+}
+
+termeh_df$unique_uplift <- NA
+
+for (i in 1:length(unique(termeh_df$famid))) {
+  fam <- termeh_df[termeh_df$famid == unique(termeh_df$famid)[i],]
+  uni_uplift <- fam %>% subset(up == 1 & uplift == 1)
+  termeh_df[termeh_df$famid == unique(termeh_df$famid)[i],]$unique_uplift <- nrow(uni_uplift)
+}
+
+      
+#dataframes
+
+df <- termeh_df
+unique_df <- termeh_df
+
+triad_df <- df %>%
+  select(famid, StudyID, dyad_part, unique_id, sp, up, malf, nonf, uplift, Informant_Unique_ID, NQ2)
+
+termeh_df <- df %>% 
+  select(famid, StudyID, dyad_part, disease_cx, rare.disease, shared_num, 
+         mom_unique_num, dad_unique_num, unique_part, network.size, network.size_duo, 
+         mom_unique_num_percent, dad_unique_num_percent, shared_num_percent, 
+         unique_num_percent, gender, marstat, unique_nonf, unique_malf, unique_uplift) %>% unique() #aggregate by StudyID
+```
+
+#Graphs
+```{r}
+#Shared Partners
+ggplot(data = termeh_df, aes(x = shared_num)) +
+  geom_density(alpha = .5, fill = "pink") +
+  geom_vline(aes(xintercept = mean(termeh_df$shared_num)), 
+             color = "red", linewidth = 1) +
+  labs(x = "# of Shared Partners",
+       caption = "Lines represent Mean",
+       title = "Density Plot of # of Shared Partners") 
+
+ggplot(data = termeh_df, aes(x = shared_num, fill = as.factor(rare.disease))) +
+  geom_density(alpha = .5) +
+  geom_vline(aes(xintercept = mean(termeh_df$shared_num)), 
+             color = "red", linewidth = 1) +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", x = "# of Shared Partners",
+       caption = "Lines represent Mean, with Red being TD and RD Combined",
+       title = "Density Plot of # of Shared Partners by Caregiving Context") +
+  geom_vline(aes(xintercept = 
+                   mean(termeh_df[termeh_df$rare.disease == "0",]$shared_num)),
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = 
+                   mean(termeh_df[termeh_df$rare.disease == "1",]$shared_num)),
+             color = "cyan", linewidth = 1)
+
+ggplot(data = termeh_df, aes(x = as.factor(rare.disease), y = shared_num, 
+                             fill = as.factor(rare.disease))) +
+  geom_violin(trim = FALSE, alpha = .5) +
+  stat_summary(fun.data = "mean_sdl", geom = "pointrange", color = "black") +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", y = "# of Shared Partners",
+       x = "Group",
+       title = "Violin Plot of # of Shared Partners by Caregiving Context",
+       caption = "Mean w. SD") +
+  theme(axis.text.x = element_blank())
+
+#Unique Partners
+manual_col <- c("0" = "cyan", "1" = "pink")
+
+ggplot(data = termeh_df, aes(x = unique_part)) +
+  geom_density(alpha = .5, fill = "pink") +
+  geom_vline(aes(xintercept = mean(termeh_df$unique_part)), color = "red",
+             linewidth = 1) +
+  labs(x = "# of Unique Partners",
+       caption = "Lines represent Mean",
+       title = "Density Plot of # of Unique Partners") 
+
+ggplot(data = termeh_df, aes(fill  = as.factor(dyad_part))) +
+  geom_density(aes(x = unique_part), alpha = .5) +
+  scale_fill_manual(values = manual_col, 
+                    labels = c("Father/Step-Father", "Mother/Step-Mother")) +
+  labs(fill = "Partner", x = "# of Unique Partners",
+       caption = "Lines represent Mean, with Red being Groups Combined",
+       title = "Density Plot of # of Unique Partners by Parent") +
+  geom_vline(aes(xintercept = mean(termeh_df$mom_unique_num, na.rm = TRUE)), 
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$dad_unique_num, na.rm = TRUE)), 
+             color = "cyan", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$unique_part)), color = "red", 
+             linewidth = 1)
+
+
+ggplot(data = termeh_df, aes(x = as.factor(dyad_part), y = unique_part, fill = as.factor(dyad_part))) +
+  geom_violin(trim = FALSE) +
+  stat_summary(fun.data = "mean_sdl", geom = "pointrange", color = "black") +
+  scale_fill_manual(values = manual_col, 
+                    labels = c("Father/Step-Father", "Mother/Step-Mother")) +
+  labs(fill = "Partner", x = "Partner", y = "# of Unique Partners",
+       title = "Violin Plot of # of Unique Partners by Parent",
+       caption = "Mean w. SD") +
+  theme(axis.text.x = element_blank())
+```
+
+#Controlling for Network Size
+```{r}
+#shared partners
+
+ggplot(data = termeh_df, aes(x = shared_num_percent)) +
+  geom_density(alpha = .5, fill = "pink") +
+  geom_vline(aes(xintercept = mean(termeh_df$shared_num_percent)), 
+             color = "red", linewidth = 1) +
+  labs(x = "% of Shared Partners",
+       caption = "Lines represent Mean",
+       title = "Density Plot of % of Shared Partners") 
+
+ggplot(data = termeh_df, aes(x = shared_num_percent, 
+                             fill = as.factor(rare.disease))) +
+  geom_density(alpha = .5) +
+  geom_vline(aes(xintercept = mean(termeh_df$shared_num_percent)), 
+             color = "red", linewidth = 1) +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", x = "% of Shared Partners/Network Size",
+       caption = "Lines represent Mean, with Red being TD and RD Combined",
+       title = "Density Plot of % of Shared Partners by Caregiving Context") +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "0",]$shared_num_percent)), 
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "1",]$shared_num_percent)), 
+             color = "cyan", linewidth = 1)
+
+ggplot(data = termeh_df, aes(x = as.factor(rare.disease), 
+                             y = shared_num_percent, 
+                             fill = as.factor(rare.disease))) +
+  geom_violin(trim = FALSE, alpha = .5) +
+  stat_summary(fun.data = "mean_sdl", geom = "pointrange", color = "black") +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", y = "% of Shared Partners/Network Size",
+       x = "Group",
+       title = "Violin Plot of % of Shared Partners by Caregiving Context",
+       caption = "Mean w. SD") +
+  theme(axis.text.x = element_blank())
+
+ggplot(data = termeh_df, aes(x = shared_num_percent, 
+                             fill = as.factor(dyad_part))) +
+  geom_density(alpha = .5) +
+  geom_vline(aes(xintercept = mean(termeh_df$shared_num_percent)), 
+             color = "red", linewidth = 1) +
+  scale_fill_manual(values = manual_col, 
+                    labels = c("Father/Step-Father", "Mother/Step-Mother")) +
+  labs(fill = "Partner", x = "% of Shared Partners/Network Size",
+       caption = "Lines represent Mean, with Red being Groups Combined",
+       title = "Density Plot of % of Shared Partners by Parent") +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$dyad_part == "0",]$shared_num_percent)),
+             color = "cyan", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$dyad_part == "1",]$shared_num_percent)),
+             color = "pink", linewidth = 1)
+
+ggplot(data = termeh_df, aes(x = as.factor(dyad_part), y = shared_num_percent, 
+                             fill = as.factor(dyad_part))) +
+  geom_violin(trim = FALSE, alpha = .5) +
+  stat_summary(fun.data = "mean_sdl", geom = "pointrange", color = "black") +
+  scale_fill_manual(values = manual_col, 
+                    labels = c("Father/Step-Father", "Mother/Step-Mother")) +
+  labs(fill = "Partner", x = "% of Shared Partners/Network Size",
+       title = "Violin Plot of % of Shared Partners by Parent",
+       caption = "Mean w. SD") +
+  theme(axis.text.x = element_blank())
+
+#unique partners
+
+ggplot(data = termeh_df, aes(x = unique_num_percent)) +
+  geom_density(alpha = .5, fill = "pink") +
+  geom_vline(aes(xintercept = mean(termeh_df$unique_num_percent)), 
+             color = "red", linewidth = 1) +
+  labs(x = "% of Unique Partners",
+       caption = "Lines represent Mean",
+       title = "Density Plot of % of Unique Partners") 
+
+ggplot(data = termeh_df, aes(fill = as.factor(dyad_part))) +
+  geom_density(aes(x = unique_num_percent), alpha = .5) +
+  scale_fill_manual(values = manual_col, 
+                    labels = c("Father/Step-Father", "Mother/Step-Mother")) +
+  labs(fill = "Partner", x = "% of Unique Partners/Network Size",
+       caption = "Lines represent Mean, with Red being Groups Combined",
+       title = "Density Plot of % of Unique Partners by Parent") +
+  geom_vline(aes(xintercept = mean(termeh_df$mom_unique_num_percent, na.rm = TRUE)), 
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$dad_unique_num_percent, na.rm = TRUE)), 
+             color = "cyan", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$unique_num_percent)), 
+             color = "red", linewidth = 1)
+
+
+ggplot(data = termeh_df, aes(x = as.factor(dyad_part), y = unique_num_percent, 
+                             fill = as.factor(dyad_part))) +
+  geom_violin(trim = FALSE) +
+  stat_summary(fun.data = "mean_sdl", geom = "pointrange", color = "black") +
+  scale_fill_manual(values = manual_col, 
+                    labels = c("Father/Step-Father", "Mother/Step-Mother")) +
+  labs(fill = "Partner", x = "Partner", y = "% of Unique Partners/Network Size",
+       title = "Violin Plot of % of Unique Partners by Parent",
+       caption = "Mean w. SD") +
+  theme(axis.text.x = element_blank())
+```
+
+#Additions
+```{r}
+#Shared Partners 
+ggplot(data = termeh_df, aes(x = shared_num, fill = as.factor(rare.disease))) +
+  geom_histogram(alpha = .5, position = "identity", binwidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$shared_num)), 
+             color = "red", linewidth = 1) +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", x = "# of Shared Partners",
+       caption = "Lines represent Mean, with Red being TD and RD Combined",
+       title = "Histogram of # of Shared Partners by Caregiving Context") +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "0",]$shared_num)),
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "1",]$shared_num)),
+             color = "cyan", linewidth = 1)
+
+ggplot(data = termeh_df, aes(x = shared_num_percent, fill = as.factor(rare.disease))) +
+  geom_histogram(alpha = .5, position = "identity", binwidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$shared_num_percent)), 
+             color = "red", linewidth = 1) +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", x = "% of Shared Partners",
+       caption = "Lines represent Mean, with Red being TD and RD Combined",
+       title = "Histogram of % of Shared Partners by Caregiving Context") +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "0",]$shared_num_percent)),
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "1",]$shared_num_percent)),
+             color = "cyan", linewidth = 1)
+
+#Unique Partners
+
+ggplot(data = termeh_df, aes(x = unique_part, fill = as.factor(rare.disease))) +
+  geom_histogram(alpha = .5, position = "identity", binwidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$unique_part)), 
+             color = "red", linewidth = 1) +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", x = "# of Unique Partners",
+       caption = "Lines represent Mean, with Red being TD and RD Combined",
+       title = "Histogram of # of Unique Partners by Caregiving Context") +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "0",]$unique_part)),
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "1",]$unique_part)),
+             color = "cyan", linewidth = 1)
+
+ggplot(data = termeh_df, aes(x = unique_num_percent, fill = as.factor(rare.disease))) +
+  geom_histogram(alpha = .5, position = "identity", binwidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df$unique_num_percent)), 
+             color = "red", linewidth = 1) +
+  scale_fill_discrete(labels = c("TD", "RD")) +
+  labs(fill = "Group", x = "% of Unique Partners",
+       caption = "Lines represent Mean, with Red being TD and RD Combined",
+       title = "Histogram of % of Unique Partners by Caregiving Context") +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "0",]$unique_num_percent)),
+             color = "pink", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(termeh_df[termeh_df$rare.disease == "1",]$unique_num_percent)),
+             color = "cyan", linewidth = 1)
+
+```
+#T-tests
+```{r}
+#recoding marstat
+termeh_df$marstat <- ifelse(termeh_df$marstat == "Married / Living as Married", 1, 0) #1= married, 0 =not
+
+#averages
+mean(termeh_df$network.size)
+mean(termeh_df$shared_num)
+mean(termeh_df$unique_part)
+
+#T-tests
+#by gender
+termeh_df %>% 
+  select(dyad_part, network.size, shared_num, unique_part) %>%
+  tbl_summary(missing = "no",
+              by = dyad_part,
+              statistic = list(all_continuous() ~ "{mean} ({sd})")) %>%
+    add_p((all_continuous() ~ "t.test"))
+
+#by caregiving context
+termeh_df %>% 
+  select(rare.disease, network.size, shared_num, unique_part) %>%
+  tbl_summary(missing = "no",
+              by = rare.disease,
+              statistic = list(all_continuous() ~ "{mean} ({sd})")) %>%
+    add_p((all_continuous() ~ "t.test"))
+
+#by marital status
+termeh_df %>% 
+  select(marstat, network.size, shared_num, unique_part) %>%
+  tbl_summary(missing = "no",
+              by = marstat,
+              statistic = list(all_continuous() ~ "{mean} ({sd})")) %>%
+    add_p((all_continuous() ~ "t.test"))
+
+```
+
+
+#Models
+```{r}
+
+#shared partners
+mod1 <- glm(shared_num ~ dyad_part + rare.disease + marstat, termeh_df,
+            family = poisson(link = "log"))
+m1 <- msummary(mod1, vcov = "HC", stars = TRUE, statistic = c("se = {std.error}",
+                                                              "p = {p.value}"))
+m1
+
+#unique partners
+mod2 <- MASS::glm.nb(unique_part ~ dyad_part + rare.disease + marstat, termeh_df)
+
+m2 <- msummary(mod2, vcov = "HC", stars = TRUE, statistic = c("se = {std.error}",
+                                                              "p = {p.value}"))
+m2
+
+#ratio of shared/unique
+termeh_df$ratio <- termeh_df$shared_num/termeh_df$unique_part
+termeh_df$ratio_log <- log(termeh_df$ratio + 1)
+termeh_df$ratio_log <- ifelse(is.infinite(termeh_df$ratio_log), 
+                              NA, termeh_df$ratio_log)
+
+mod3 <- lm(ratio_log ~ dyad_part + rare.disease + marstat, termeh_df)
+
+m3 <- msummary(mod3, vcov = "HC", stars = TRUE, statistic = c("se = {std.error}",
+                                                              "p = {p.value}"))
+m3
+```
+#Relation Coding
+```{r}
+#assess if they are enumerated in eachothers networks
+dyad_couple <- triad_df %>% select(famid, Informant_Unique_ID) %>% unique()
+
+triad_df$enumerated <- NA
+
+for (i in 1:length(unique(triad_df$StudyID))) {
+  id <- unique(triad_df$StudyID)[i]
+  id_list <- triad_df[triad_df$StudyID == id,]
+  fam <- unique(id_list$famid)
+  partner_id <- dyad_couple$Informant_Unique_ID[dyad_couple$famid == fam & 
+                dyad_couple$Informant_Unique_ID != unique(id_list$Informant_Unique_ID)]
+  check <- sum(id_list$unique_id %in% partner_id)
+  triad_df[triad_df$StudyID == id,]$enumerated <- check
+}
+
+#figure out type of relationship
+
+dyad_match <- triad_df %>% select(famid, StudyID, Informant_Unique_ID) %>% unique()
+triad_df$m_f <- NA
+
+for (i in 1:length(dyad_match$famid)) {
+  dyad <- triad_df[triad_df$famid == dyad_match$famid[i],]
+  dyad <- dyad %>% select(StudyID, enumerated, dyad_part) %>% unique()
+  dad <- dyad[dyad$dyad_part == 0,]$enumerated
+  mom <- dyad[dyad$dyad_part == 1,]$enumerated
+  if (dad == 1 & mom == 1) {
+    triad_df[triad_df$famid == dyad_match$famid[i],]$m_f <- "Reciprocal"
+  } else if (dad != mom) {
+    triad_df[triad_df$famid == dyad_match$famid[i],]$m_f <- "Ambivalent"
+  } else if (dad == 0 & mom == 0) {
+    triad_df[triad_df$famid == dyad_match$famid[i],]$m_f <- "Null"
+  }
+}
+
+#tallying relationship
+triad_aggregated <- triad_df %>% select(famid, m_f) %>% unique()
+table(triad_aggregated$m_f)
+
+#model
+triad_df$m_f_recoded <- ifelse(triad_df$m_f == "Reciprocal", "Reciprocal", "Not Reciprocal")
+
+triad_add <- triad_df %>% select(StudyID, m_f_recoded) %>% unique()
+termeh_df <- merge(termeh_df, triad_add, by = "StudyID")
+
+mod4 <- glm(as.factor(m_f_recoded) ~ rare.disease + marstat, termeh_df,
+            family = "binomial")
+m4 <- msummary(mod1, vcov = "HC", stars = TRUE, statistic = c("se = {std.error}",
+                                                              "p = {p.value}"
+                                                              ))
+exp(coef(mod4))
+m4
+```
+
+#Trial Census
+```{r}
+#filter for shared partners 
+dyad_df <- triad_df
+
+triad_df <- triad_df %>%
+  subset(sp == 1) %>%
+  select(-c(sp, up))
+
+#clean df
+partner1 <- triad_df %>% subset(dyad_part == 1)
+partner2 <- triad_df %>% subset(dyad_part == 0)
+
+colnames(partner1)[8] <- "Mother"
+partner1 <- partner1 %>% select(-dyad_part)
+colnames(partner1)[c(2, 4:6, 8, 9)] <- c("StudyID_Mother", "malf_Mother", 
+                                         "nonf_Mother", "uplift_Mother", 
+                                         "NQ2_Mother", "enumerated_Mother")
+colnames(partner2)[8] <- "Father"
+partner2 <- partner2 %>% select(-dyad_part)
+colnames(partner2)[c(2, 4:6, 8, 9)] <- c("StudyID_Father", "malf_Father", 
+                                         "nonf_Father", "uplift_Father",
+                                         "NQ2_Father","enumerated_Father")
+
+
+triad_census <- merge(partner1, partner2, by = c("famid", "unique_id"), all = TRUE)
+triad_census <- triad_census %>% 
+  select(famid, StudyID_Mother, StudyID_Father, Mother, Father, unique_id, 
+         everything())
+colnames(triad_census)[6] <- "Shared_Partner"
+
+#collapse nonf with malf
+triad_census$malf_nonf_mother <- ifelse(triad_census$malf_Mother == 1 |
+                                          triad_census$nonf_Mother == 1, 1, 0)
+triad_census$malf_nonf_father <- ifelse(triad_census$malf_Father == 1 | 
+                                          triad_census$nonf_Father == 1, 1, 0)
+
+
+#check for NQ2
+triad_census$NQ2_Father[is.na(triad_census$NQ2_Father)] <- 0
+triad_census$NQ2_Mother[is.na(triad_census$NQ2_Mother)] <- 0
+
+triad_census$nq2_cons <- ifelse(triad_census$NQ2_Father + triad_census$NQ2_Mother == 2, 1, 0)
+table(triad_census$nq2_cons) 
+
+triad_census <- triad_census %>%
+  subset(nq2_cons == 1) %>%
+  select(-c(NQ2_Mother, NQ2_Father, nq2_cons))
+
+#shared partner states
+triad_census$states <- NA
+
+for (i in 1:nrow(triad_census)) {
+  #1ST COLUMN
+  if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "00,00"
+  } else if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "0U,00"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "MN0,00"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "MNU,00"
+    #SECOND COLUMN
+  } else if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "00,0U"
+  } else if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "0U,0U"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "MN0,0U"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 0 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "MNU,0U" 
+    #THIRD COLUMN
+  } else if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "00,MN0"
+  } else if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "0U,MN0"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "MN0,MN0"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 0) {
+    triad_census$states[i] <- "MNU,MN0"
+    #FOURTH COLUMN
+  } else if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "00,MNU"
+  } else if (triad_census$malf_nonf_mother[i] == 0 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "0U,MNU"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 0 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "MN0,MNU"
+  } else if (triad_census$malf_nonf_mother[i] == 1 &
+      triad_census$uplift_Mother[i] == 1 &
+      triad_census$malf_nonf_father[i] == 1 &
+      triad_census$uplift_Father[i] == 1) {
+    triad_census$states[i] <- "MNU,MNU"
+  }
+}
+
+table(triad_census$states) #count
+
+ggplot(data = triad_census, aes(states)) +
+  geom_bar() +
+  labs(title = "Shared Partner States Count", x = "Shared Partner States") +
+  theme(axis.text.x = element_text(angle = 45))
+
+triad_prop <- as.data.frame(prop.table(table(triad_census$states)))
+triad_prop$Freq <- triad_prop$Freq * 100
+
+ggplot(data = triad_prop) +
+  geom_col(aes(x = Var1, y = Freq)) +
+  labs(title = "Shared Partner States Proportion", 
+       x = "Shared Partner States", y = "Percent") +
+  theme(axis.text.x = element_text(angle = 45))
+
+triad_prop <- merge(triad_prop, as.data.frame(table(triad_census$states)), by = "Var1")
+colnames(triad_prop) <- c("States", "%", "Count")
+triad_prop <- triad_prop %>% select(States, Count, `%`)
+triad_prop$`%` <- round(triad_prop$`%`, 2)
+
+#dichotomize
+# triad_census$triad <- ifelse(triad_census$states %in% 
+#                                c("00,00", "0U, 0U", "MN0,MN0", 
+#                                  "MNU,MNU", "MNU, MN0", "MN0,MNU"), 1, 0)
+triad_census$triad <- ifelse(triad_census$states %in% c("MN0,MN0", "MN0,MNU", "MNU,MN0", "MNU,MNU"), 1, 0)
+
+#nonf consensus
+triad_census$nonf_sym <- NA
+triad_census$nonf_asym <- NA
+triad_census$nonf_null <- NA
+
+
+for (i in 1:nrow(triad_census)) {
+  if (triad_census$nonf_Father[i] == 1 & triad_census$nonf_Mother[i] == 1) {
+    triad_census$nonf_sym[i] <- 1
+  } else if (triad_census$nonf_Father[i] == 0 & triad_census$nonf_Mother[i] == 0) {
+    triad_census$nonf_null[i] <- 1
+  } else if (triad_census$nonf_Father[i] != triad_census$nonf_Mother[i] ) {
+    triad_census$nonf_asym[i] <- 1
+  }
+}
+
+triad_census$nonf_sym[is.na(triad_census$nonf_sym)] <- 0
+triad_census$nonf_asym[is.na(triad_census$nonf_asym)] <- 0
+triad_census$nonf_null[is.na(triad_census$nonf_null)] <- 0
+
+#malf consensus
+triad_census$malf_sym <- NA
+triad_census$malf_asym <- NA
+triad_census$malf_null <- NA
+
+
+for (i in 1:nrow(triad_census)) {
+  if (triad_census$malf_Father[i] == 1 & triad_census$malf_Mother[i] == 1) {
+    triad_census$malf_sym[i] <- 1
+  } else if (triad_census$malf_Father[i] == 0 & triad_census$malf_Mother[i] == 0) {
+    triad_census$malf_null[i] <- 1
+  } else if (triad_census$malf_Father[i] != triad_census$malf_Mother[i] ) {
+    triad_census$malf_asym[i] <- 1
+  }
+}
+
+triad_census$malf_sym[is.na(triad_census$malf_sym)] <- 0
+triad_census$malf_asym[is.na(triad_census$malf_asym)] <- 0
+triad_census$malf_null[is.na(triad_census$malf_null)] <- 0
+
+#uplift consensus
+triad_census$uplift_sym <- NA
+triad_census$uplift_asym <- NA
+triad_census$uplift_null <- NA
+
+
+for (i in 1:nrow(triad_census)) {
+  if (triad_census$uplift_Father[i] == 1 & triad_census$uplift_Mother[i] == 1) {
+    triad_census$uplift_sym[i] <- 1
+  } else if (triad_census$uplift_Father[i] == 0 & triad_census$uplift_Mother[i] == 0) {
+    triad_census$uplift_null[i] <- 1
+  } else if (triad_census$uplift_Father[i] != triad_census$uplift_Mother[i] ) {
+    triad_census$uplift_asym[i] <- 1
+  }
+}
+
+triad_census$uplift_sym[is.na(triad_census$uplift_sym)] <- 0
+triad_census$uplift_asym[is.na(triad_census$uplift_asym)] <- 0
+triad_census$uplift_null[is.na(triad_census$uplift_null)] <- 0
+
+
+```
+
+#Dyad Census
+
+```{r}
+#list of dyads
+dyad_match$partner_uid <- NA
+
+for (i in 1:nrow(dyad_match)) {
+  row <- dyad_match[i,]
+  partner <- dyad_match[dyad_match$famid == row$famid & 
+                          dyad_match$Informant_Unique_ID != row$Informant_Unique_ID,]$Informant_Unique_ID
+  dyad_match[i,]$partner_uid <- partner
+}
+
+#dyad census df
+colnames(dyad_df)[4] <- "partner_uid"
+dyad_df <- merge(dyad_match, dyad_df, by = colnames(dyad_match), all.x = TRUE)
+dyad_df$m_f_recoded[is.na(dyad_df$m_f_recoded)] <- "Not Reciprocal"
+
+dyad_gender <- termeh_df %>% select(StudyID, dyad_part) %>% unique()
+dyad_df <- dyad_df %>%
+  select(-dyad_part) %>%
+  merge(., dyad_gender, by = "StudyID")
+
+#filter for participants only
+
+partner1 <- dyad_df %>% subset(dyad_part == 1)
+partner2 <- dyad_df %>% subset(dyad_part == 0)
+
+colnames(partner1)[3] <- "Mother"
+partner1 <- partner1 %>% select(-c(dyad_part, sp, up, m_f)) %>% select(famid, everything())
+colnames(partner1)[2:10] <- paste(colnames(partner1)[2:10], "mother", sep = "_")
+
+colnames(partner2)[3] <- "Father"
+partner2 <- partner2 %>% select(-c(dyad_part, sp, up, m_f)) %>% select(famid, everything())
+colnames(partner2)[2:10] <- paste(colnames(partner2)[2:10], "father", sep = "_")
+
+
+dyad_census <- merge(partner1, partner2, by = c("famid"))
+
+#collapse nonf with malf
+dyad_census$malf_nonf_mother <- ifelse(dyad_census$malf_mother == 1 |
+                                          dyad_census$nonf_mother == 1, 1, 0)
+dyad_census$malf_nonf_father <- ifelse(dyad_census$malf_father == 1 | 
+                                          dyad_census$nonf_father == 1, 1, 0)
+
+
+#check for NQ2
+dyad_census$NQ2_father[is.na(dyad_census$NQ2_father)] <- 0
+dyad_census$NQ2_mother[is.na(dyad_census$NQ2_mother)] <- 0
+
+dyad_census$nq2_cons <- ifelse(dyad_census$NQ2_father + dyad_census$NQ2_mother == 2, 1, 0)
+table(dyad_census$nq2_cons) #20 who aren't
+table(dyad_census$m_f_recoded_father)
+
+#Fill in NULLS
+dyad_census$states <- NA
+dyad_census[dyad_census$m_f_recoded_father == "Not Reciprocal",]$states <- "NULL"
+
+#dyad census states
+for (i in 1:nrow(dyad_census)) {
+  #1ST COLUMN
+  if (!is.na(dyad_census$states[i])) {
+    next
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+      dyad_census$uplift_mother[i] == 0 &
+      dyad_census$malf_nonf_father[i] == 0 &
+      dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "00,00"
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 0 &
+             dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "0U,00"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 0 &
+             dyad_census$malf_nonf_father[i] == 0 &
+             dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "MN0,00"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 0 &
+             dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "MNU,00"
+    #SECOND COLUMN
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+             dyad_census$uplift_mother[i] == 0 &
+             dyad_census$malf_nonf_father[i] == 0 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "00,0U"
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 0 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "0U,0U"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 0 &
+             dyad_census$malf_nonf_father[i] == 0 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "MN0,0U"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 0 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "MNU,0U" 
+    #THIRD COLUMN
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+             dyad_census$uplift_mother[i] == 0 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "00,MN0"
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "0U,MN0"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 0 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "MN0,MN0"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 0) {
+    dyad_census$states[i] <- "MNU,MN0"
+    #FOURTH COLUMN
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+             dyad_census$uplift_mother[i] == 0 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "00,MNU"
+  } else if (dyad_census$malf_nonf_mother[i] == 0 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "0U,MNU"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 0 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "MN0,MNU"
+  } else if (dyad_census$malf_nonf_mother[i] == 1 &
+             dyad_census$uplift_mother[i] == 1 &
+             dyad_census$malf_nonf_father[i] == 1 &
+             dyad_census$uplift_father[i] == 1) {
+    dyad_census$states[i] <- "MNU,MNU"
+  }  
+}
+
+for (i in 1:nrow(dyad_census)) {
+  if(dyad_census$states[i] != "NULL") {
+    next
+  } else {
+    if (is.na(dyad_census$malf_nonf_mother[i]) &
+        is.na(dyad_census$uplift_mother[i]) &
+        is.na(dyad_census$malf_nonf_father[i]) &
+        is.na(dyad_census$uplift_father[i])) {
+      dyad_census$states[i] <- "NULL"
+    } else if (is.na(dyad_census$malf_nonf_mother[i]) &
+               is.na(dyad_census$uplift_mother[i]) &
+               dyad_census$malf_nonf_father[i] == 1 &
+               dyad_census$uplift_father[i] == 1) {
+      dyad_census$states[i] <- "00,MNU"
+    } else if (dyad_census$malf_nonf_mother[i] == 1 &
+               dyad_census$uplift_mother[i] == 1 &
+                is.na(dyad_census$malf_nonf_father[i]) &
+                is.na(dyad_census$uplift_father[i])) {
+      dyad_census$states[i] <- "MNU,00"
+    }
+  }
+}
+
+table(dyad_census$states) #count
+
+dyad_prop <- as.data.frame(prop.table(table(dyad_census$states)))
+dyad_prop$Freq <- dyad_prop$Freq * 100
+
+dyad_prop <- merge(dyad_prop, as.data.frame(table(dyad_census$states)), by = "Var1")
+colnames(dyad_prop) <- c("States", "%", "Count")
+dyad_prop <- dyad_prop %>% select(States, Count, `%`)
+
+dyad_census$dyad <- ifelse(dyad_census$states == "MNU,MNU", 1, 0)
+
+#nonf consensus
+dyad_census$nonf_sym <- NA
+dyad_census$nonf_asym <- NA
+dyad_census$nonf_null <- NA
+
+for (i in 1:nrow(dyad_census)) {
+  if (is.na(dyad_census$nonf_father[i]) & is.na(dyad_census$nonf_mother[i])) {
+    next
+  } else if (is.na(dyad_census$nonf_father[i]) & dyad_census$nonf_mother[i] == 0) {
+    dyad_census$nonf_asym[i] <- 1
+  } else if (is.na(dyad_census$nonf_mother[i]) & dyad_census$nonf_father[i] == 0) {
+    dyad_census$nonf_asym[i] <- 1
+  } else if (dyad_census$nonf_father[i] == 1 & dyad_census$nonf_mother[i] == 1) {
+    dyad_census$nonf_sym[i] <- 1
+  } else if (dyad_census$nonf_father[i] == 0 & dyad_census$nonf_mother[i] == 0) {
+    dyad_census$nonf_null[i] <- 1
+  } else if (dyad_census$nonf_father[i] != dyad_census$nonf_mother[i] ) {
+    dyad_census$nonf_asym[i] <- 1
+  }
+}
+
+dyad_census$nonf_sym[is.na(dyad_census$nonf_sym)] <- 0
+dyad_census$nonf_asym[is.na(dyad_census$nonf_asym)] <- 0
+dyad_census$nonf_null[is.na(dyad_census$nonf_null)] <- 0
+
+#malf consensus
+dyad_census$malf_sym <- NA
+dyad_census$malf_asym <- NA
+dyad_census$malf_null <- NA
+dyad_census$temp <- NA
+
+for (i in 1:nrow(dyad_census)) {
+  if (is.na(dyad_census$malf_father[i]) & is.na(dyad_census$malf_mother[i])) {
+    next
+  } else if (is.na(dyad_census$malf_father[i]) & dyad_census$malf_mother[i] == 0) {
+    dyad_census$malf_asym[i] <- 1
+  } else if (is.na(dyad_census$malf_mother[i]) & dyad_census$malf_father[i] == 0) {
+    dyad_census$malf_asym[i] <- 1
+  } else if (is.na(dyad_census$malf_mother[i]) & dyad_census$malf_father[i] == 1) {
+    dyad_census$malf_asym[i] <- 1
+  } else if (is.na(dyad_census$malf_father[i]) & dyad_census$malf_mother[i] == 1) {
+    dyad_census$malf_asym[i] <- 1
+  } else if (dyad_census$malf_father[i] == 1 & dyad_census$malf_mother[i] == 1) {
+    dyad_census$malf_sym[i] <- 1
+  } else if (dyad_census$malf_father[i] == 0 & dyad_census$malf_mother[i] == 0) {
+    dyad_census$malf_null[i] <- 1
+  } else if (dyad_census$malf_father[i] != dyad_census$malf_mother[i] ) {
+    dyad_census$malf_asym[i] <- 1
+  }
+}
+
+dyad_census$malf_sym[is.na(dyad_census$malf_sym)] <- 0
+dyad_census$malf_asym[is.na(dyad_census$malf_asym)] <- 0
+dyad_census$malf_null[is.na(dyad_census$malf_null)] <- 0
+
+#uplift consensus
+dyad_census$uplift_sym <- NA
+dyad_census$uplift_asym <- NA
+dyad_census$uplift_null <- NA
+dyad_census$temp <- NA
+
+for (i in 1:nrow(dyad_census)) {
+  if (is.na(dyad_census$uplift_father[i]) & is.na(dyad_census$uplift_mother[i])) {
+    next
+  } else if (is.na(dyad_census$uplift_father[i]) & dyad_census$uplift_mother[i] == 0) {
+    dyad_census$uplift_asym[i] <- 1
+  } else if (is.na(dyad_census$uplift_mother[i]) & dyad_census$uplift_father[i] == 0) {
+    dyad_census$uplift_asym[i] <- 1
+  } else if (is.na(dyad_census$uplift_mother[i]) & dyad_census$uplift_father[i] == 1) {
+    dyad_census$uplift_asym[i] <- 1
+  } else if (is.na(dyad_census$uplift_father[i]) & dyad_census$uplift_mother[i] == 1) {
+    dyad_census$uplift_asym[i] <- 1
+  } else if (dyad_census$uplift_father[i] == 1 & dyad_census$uplift_mother[i] == 1) {
+    dyad_census$uplift_sym[i] <- 1
+  } else if (dyad_census$uplift_father[i] == 0 & dyad_census$uplift_mother[i] == 0) {
+    dyad_census$uplift_null[i] <- 1
+  } else if (dyad_census$uplift_father[i] != dyad_census$uplift_mother[i] ) {
+    dyad_census$uplift_asym[i] <- 1
+  }
+}
+
+dyad_census$uplift_sym[is.na(dyad_census$uplift_sym)] <- 0
+dyad_census$uplift_asym[is.na(dyad_census$uplift_asym)] <- 0
+dyad_census$uplift_null[is.na(dyad_census$uplift_null)] <- 0
+
+```
+
+#Chi Square and Adding Survey Data
+```{r}
+#Crosstabs
+dyad_dich <- dyad_census %>% select(famid, dyad, nonf_sym, nonf_asym, nonf_null, malf_sym, malf_asym, malf_null, uplift_sym, uplift_asym, uplift_null)
+colnames(dyad_dich)[3:11] <- c("dyad_nonf_sym", "dyad_nonf_asym", "dyad_nonf_null", "dyad_malf_sym", "dyad_malf_asym", "dyad_malf_null", "dyad_uplift_sym", "dyad_uplift_asym", "dyad_uplift_null")
+
+triad_census <- triad_census %>%
+  group_by(famid) %>%
+  mutate(nonf_asym_total = sum(nonf_asym),
+         nonf_sym_total = sum(nonf_sym),
+         nonf_null_total = sum(nonf_null),
+         malf_asym_total = sum(malf_asym),
+        malf_sym_total = sum(malf_sym),
+        malf_null_total = sum(malf_null),
+        uplift_asym_total = sum(uplift_asym),
+        uplift_sym_total = sum(uplift_sym),
+        uplift_null_total = sum(uplift_null),
+        #totals
+        malf_shared_total = sum(malf_asym_total, malf_sym_total),
+        nonf_shared_total = sum(nonf_asym_total, nonf_sym_total),
+        uplift_shared_total = sum(uplift_asym_total, uplift_sym_total))
+
+census <- merge(triad_census, dyad_dich, by = c("famid"), all= TRUE)
+
+table(census$triad, census$dyad)
+
+#Chi Square
+chisq.test(census$triad, census$dyad, correct = FALSE)
+
+#Survey
+depression_col <- colnames(survey)[161:171] #need to be reversed coded
+pac_col <- colnames(survey)[68:76]
+ptg_col <- colnames(survey)[77:97]
+stress_col <- colnames(survey)[53:67]
+sf12_col <- colnames(survey)[225:236]
+burden_col <- colnames(survey)[41:52]
+
+survey <- survey %>% select(all_of(depression_col),
+                            all_of(pac_col),
+                            all_of(ptg_col),
+                            all_of(stress_col),
+                            all_of(sf12_col),
+                            all_of(burden_col),
+                            marstat, empstat, age, hhinc, race, educate, StudyID, cr_age) 
+
+#reverse coding cesd
+survey$cesd3 <- recode(survey$cesd3, '0' = 3, '1' = 2, '2' = 1, '3' = 0)
+survey$cesd7 <- recode(survey$cesd7, '0' = 3, '1' = 2, '2' = 1, '3' = 0)
+
+#reverse coding sf12
+survey$phlth_pain <- recode(survey$phlth_pain, 
+                                '0' =  4, '1' = 3, '2' = 2, '3' = 1,  '4' = 0)
+survey$mhlth_depressed <- recode(survey$mhlth_depressed,
+                                     '0' = 5, '1' = 4, '2' = 3, '3' = 2, '4' = 1, '5' = 0)
+survey$phlth_move <- recode(survey$phlth_move,
+                                '0' = 2, '1' = 1, '2' = 0)
+survey$hlth_soc <- ifelse(survey$hlth_soc == "5", "4", survey$hlth_soc) #recodes 5 to 4
+survey$hlth_soc <- recode(survey$hlth_soc, '4' = 0, '3' = 1, '2' = 2, '1' = 3, '0' = 4)
+
+#computing sf12
+#indicator variables for sf12
+survey <- survey %>%
+  mutate(phlth_move_little = ifelse(phlth_move == 1, 1, 0),
+         phlth_move_lot = ifelse(phlth_move == 0, 1, 0),
+         phlth_climb_little = ifelse(phlth_climb == 1, 1, 0),
+         phlth_climb_lot = ifelse(phlth_climb == 0, 1, 0),
+         phlth_less_1 = ifelse(phlth_less == 1, 1, 0),
+         phlth_limit_1 = ifelse(phlth_limit == 1, 1, 0),
+         phlth_pain_extremely = ifelse(phlth_pain == 0, 1, 0),
+         phlth_pain_quite = ifelse(phlth_pain == 1, 1, 0),
+         phlth_pain_moderately = ifelse(phlth_pain == 2, 1, 0),
+         phlth_pain_little = ifelse(phlth_pain == 3, 1, 0),
+         srhlth_very = ifelse(srhlth == 4, 1, 0),
+         srhlth_good = ifelse(srhlth == 3, 1, 0),
+         srhlth_fair = ifelse(srhlth == 2, 1, 0),
+         srhlth_poor = ifelse(srhlth == 0, 1, 0),
+         mhlth_energy_little = ifelse(mhlth_energy == 1, 1, 0),
+         mhlth_energy_some = ifelse(mhlth_energy == 2, 1, 0),
+         mhlth_energy_good = ifelse(mhlth_energy == 3, 1, 0),
+         mhlth_energy_most = ifelse(mhlth_energy == 4, 1, 0),
+         mhlth_energy_none = ifelse(mhlth_energy == 0, 1, 0),
+         hlth_soc_all = ifelse(hlth_soc == 0, 1, 0),
+         hlth_soc_most = ifelse(hlth_soc == 1, 1, 0),
+         hlth_soc_good = ifelse(hlth_soc == 2, 1, 0),
+         hlth_soc_some = ifelse(hlth_soc == 3, 1, 0),
+         hlth_soc_little = ifelse(hlth_soc == 4, 1, 0),
+         mhlth_less_1 = ifelse(mhlth_less == 1, 1, 0),
+         mhlth_limit_1 = ifelse(mhlth_limit == 1, 1, 0),
+         mhlth_calm_little = ifelse(mhlth_calm == 1, 1, 0),
+         mhlth_calm_some = ifelse(mhlth_calm == 2, 1, 0),
+         mhlth_calm_good = ifelse(mhlth_calm == 3, 1, 0),
+         mhlth_calm_most = ifelse(mhlth_calm == 4, 1, 0),
+          mhlth_calm_none = ifelse(mhlth_calm == 0, 1, 0),
+         mhlth_depressed_all = ifelse(mhlth_depressed == 0, 1, 0),
+         mhlth_depressed_most = ifelse(mhlth_depressed == 1, 1, 0),
+         mhlth_depressed_good = ifelse(mhlth_depressed == 2, 1, 0),
+         mhlth_depressed_some = ifelse(mhlth_depressed == 3, 1, 0),
+         mhlth_depressed_little = ifelse(mhlth_depressed == 4, 1, 0))
+
+#summing
+survey <- survey %>%
+  mutate(
+    sf12_p_sum = (phlth_move_lot*-7.23216) + (phlth_move_little*-3.45555) +
+      (phlth_climb_lot*-6.24397) + (phlth_climb_little*-2.73557) +
+      (phlth_less_1*-4.61617) +
+      (phlth_limit_1*-5.51747) +
+      (phlth_pain_extremely*-11.25544) + (phlth_pain_quite*-8.38063) + (phlth_pain_moderately*-6.50522) + (phlth_pain_little*-3.80130) +
+      (srhlth_poor*-8.37399) + (srhlth_fair*-5.56461) + (srhlth_good*-3.02396) + (srhlth_very*-1.31872) +
+      (mhlth_energy_none*-2.44706) + (mhlth_energy_little*-2.02168) + (mhlth_energy_some*-1.61850) + (mhlth_energy_good*-1.14387) + (mhlth_energy_most*-0.42251) +
+      (hlth_soc_all*-0.33682) + (hlth_soc_most*-0.94342) + (hlth_soc_some*-0.18043) + (hlth_soc_little*-0.11038) +
+      (mhlth_less_1*3.04365) +
+      (mhlth_limit_1*2.32091) +
+      (mhlth_calm_none*3.46638) + (mhlth_calm_little*2.90426) + (mhlth_calm_some*2.37241) + (mhlth_calm_good*1.36689) + (mhlth_calm_most*0.66514) +
+      (mhlth_depressed_all*4.61446) + (mhlth_depressed_most*3.41593) + (mhlth_depressed_good*2.34247) + (mhlth_depressed_some*1.28044) + (mhlth_depressed_little*0.41188),
+    
+    sf12_m_sum = (phlth_move_lot*3.93115) + (phlth_move_little*1.86840) +
+      (phlth_climb_lot*2.68282) + (phlth_climb_little*1.43103) +
+      (phlth_less_1*1.44060) +
+      (phlth_limit_1*1.66968) +
+      (phlth_pain_extremely*1.48619) + (phlth_pain_quite*1.76691) + (phlth_pain_moderately*1.49384) + (phlth_pain_little*0.90384) +
+      (srhlth_poor*-1.71175) + (srhlth_fair*-0.16891) + (srhlth_good*0.03482) + (srhlth_very*-0.06064) +
+      (mhlth_energy_none*-6.02409) + (mhlth_energy_little*-4.88962) + (mhlth_energy_some*-3.29805) + (mhlth_energy_good*-1.65178) + (mhlth_energy_most*-0.92057) +
+      (hlth_soc_all*-6.29724) + (hlth_soc_most*-8.26066) + (hlth_soc_some*-5.63286) + (hlth_soc_little*-3.13896) +
+      (mhlth_less_1*-6.82672) +
+      (mhlth_limit_1*5.69921) +
+      (mhlth_calm_none*-10.19085) + (mhlth_calm_little*-7.92717) + (mhlth_calm_some*-6.321121) + (mhlth_calm_good*-4.09842) + (mhlth_calm_most*-1.94949) +
+      (mhlth_depressed_all*-16.15395) + (mhlth_depressed_most*-10.77911) + (mhlth_depressed_good*-8.09914) + (mhlth_depressed_some*-4.59055) + (mhlth_depressed_little*-1.95934),
+    sf12_physical = sf12_p_sum + 56.57706,
+    sf12_mental = sf12_m_sum + 60.75781
+  )
+#adding famid
+survey <- survey %>%
+  mutate(famid = substr(StudyID, 1, 3))
+
+#computing scale scores
+survey$cesd_mean <- NA
+survey$pac_mean <- NA
+survey$ptg_mean <- NA
+survey$ies_mean <- NA
+survey$burden_mean <- NA
+
+for (i in 1:nrow(survey)) {
+  #means cesd
+  row <- survey[i, all_of(depression_col)]
+  survey$cesd_mean[i] <- mean(as.numeric(row), na.rm = TRUE)
+  #mean pac
+  row <- survey[i, all_of(pac_col)]
+  survey$pac_mean[i] <- mean(as.numeric(row), na.rm = TRUE)
+  #mean ptg
+  row <- survey[i, all_of(ptg_col)]
+  survey$ptg_mean[i] <- mean(as.numeric(row), na.rm = TRUE)
+  #mean ies
+  row <- survey[i, all_of(stress_col)]
+  survey$ies_mean[i] <- mean(as.numeric(row), na.rm = TRUE)
+  #mean cgd
+  row <- survey[i, all_of(burden_col)]
+  survey$burden_mean[i] <- mean(as.numeric(row), na.rm = TRUE)
+} 
+
+#recoding covariates
+
+survey <- survey %>% 
+  mutate(across(race, ~replace(.,. == "", NA)))
+survey$race <- ifelse(survey$race == "White", 1, 0) #1 = white, 0 = POC
+survey$race <- as.factor(survey$race)
+
+
+survey <- survey %>% 
+  mutate(across(marstat, ~replace(.,. == "", NA)))
+survey$marstat <- ifelse(survey$marstat == "Married / Living as Married", 1, 0) 
+survey$marstat <- as.factor(survey$marstat)
+
+
+survey <- survey %>% 
+  mutate(across(educate, ~replace(.,. == "", NA)))
+survey$educate <- ifelse(survey$educate == "Post-Graduate Degree" | survey$educate == "Bachelor’s Degree", 1, 0)
+survey$educate <- as.factor(survey$educate)
+
+
+survey <- survey %>% 
+  mutate(across(empstat, ~replace(.,. == "", NA)))
+
+survey$empstat <- ifelse(survey$empstat == "Not employed (including student or homemaker)" | survey$empstat == "Retired", 0, 1)
+
+survey$empstat <- as.factor(survey$empstat)
+
+
+survey <- survey %>% 
+  mutate(across(hhinc, ~replace(.,. == "", NA)))
+survey$hhinc <- ifelse(survey$hhinc == "Don’t know", NA, survey$hhinc)
+survey$hhinc <- factor(survey$hhinc, levels = c( "$20,000 or less", "$20,001 to $35,000", "$35,001 to $50,000", "$50,001 to $75,000",
+                                         "$75,001 to $100,000", "$100,001 to 125,000", "$125,001 to 150,000", "$150,001 to 200,000",
+                                         "Greater than $200,000"))
+
+survey$hhinc <- ifelse(survey$hhinc == "$20,000 or less" | survey$hhinc == "$20,001 to $35,000" | survey$hhinc == "$35,001 to $50,000", 0, 1) #0 = "Low Income (<= $50,000)", 1 = "High Income (> $50,000)"
+survey$hhinc <- as.factor(survey$hhinc)
+
+#merging
+survey <- survey %>% select(famid, StudyID, cesd_mean, pac_mean, ptg_mean, ies_mean, 
+                            burden_mean, sf12_physical, sf12_mental,
+                            marstat, empstat, age, hhinc, race, educate, cr_age)
+
+dyad_gender <- dyad_gender %>%
+  mutate(famid = substr(StudyID, 1, 3))
+
+census <- census %>% 
+  select(famid, StudyID_Mother, StudyID_Father, Mother, Father, Shared_Partner, triad, dyad, m_f_recoded.x, 
+         nonf_asym_total, nonf_sym_total, nonf_null_total, 
+         dyad_nonf_sym, dyad_nonf_asym, dyad_nonf_null, 
+         malf_asym_total, malf_sym_total, malf_null_total, 
+         dyad_malf_sym, dyad_malf_asym, dyad_malf_null,
+         uplift_asym_total, uplift_sym_total, uplift_null_total, 
+         dyad_uplift_sym, dyad_uplift_asym, dyad_uplift_null)
+
+survey <- merge(dyad_gender, survey, by = c("StudyID", "famid"), all.x = TRUE)
+
+df <- merge(census, survey, by = "famid", all.x = TRUE)
+
+#demographics
+mean(survey$age, na.rm = TRUE)
+sd(survey$age, na.rm = TRUE)
+range(survey$cr_age, na.rm = TRUE)
+```
+#Models
+```{r}
+#CESD
+modCESD_Dyad <- lm(cesd_mean ~ dyad + 
+                     marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                   df)
+mCESD_Dyad <- msummary(modCESD_Dyad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+modCESD_triad <- lm(cesd_mean ~ triad + 
+                     marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                   df)
+mCESD_triad <- msummary(modCESD_triad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+#ptg
+modptg_Dyad <- lm(ptg_mean ~ dyad + 
+                     marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                   df)
+mptg_Dyad <- msummary(modptg_Dyad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+modptg_triad <- lm(ptg_mean ~ triad + 
+                      marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                    df)
+mptg_triad <- msummary(modptg_triad, vcov = "HC", stars = TRUE, 
+                        statistic = c("se = {std.error}", "p = {p.value}"))
+
+#pac
+modpac_Dyad <- lm(pac_mean ~ dyad + 
+                     marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                   df)
+mpac_Dyad <- msummary(modpac_Dyad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+modpac_triad <- lm(pac_mean ~ triad + 
+                      marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                    df)
+mpac_triad <- msummary(modpac_triad, vcov = "HC", stars = TRUE, 
+                        statistic = c("se = {std.error}", "p = {p.value}"))
+
+#sf12_mental
+modsf12_mental_Dyad <- lm(sf12_mental ~ dyad + 
+                     marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                   df)
+msf12_mental_Dyad <- msummary(modsf12_mental_Dyad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+modsf12_mental_triad <- lm(sf12_mental ~ triad + 
+                      marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                    df)
+msf12_mental_triad <- msummary(modsf12_mental_triad, vcov = "HC", stars = TRUE, 
+                        statistic = c("se = {std.error}", "p = {p.value}"))
+#sf12_physical
+modsf12_physical_Dyad <- lm(sf12_physical ~ dyad + 
+                     marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                   df)
+msf12_physical_Dyad <- msummary(modsf12_physical_Dyad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+modsf12_physical_triad <- lm(sf12_physical ~ triad + 
+                      marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                    df)
+msf12_physical_triad <- msummary(modsf12_physical_triad, vcov = "HC", stars = TRUE, 
+                        statistic = c("se = {std.error}", "p = {p.value}"))
+
+#IES
+modies_Dyad <- lm(ies_mean ~ dyad + 
+                     marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                   df)
+mies_Dyad <- msummary(modies_Dyad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+modies_triad <- lm(ies_mean ~ triad + 
+                      marstat + dyad_part + empstat + age + hhinc + race + educate + cr_age,
+                    df)
+mies_triad <- msummary(modies_triad, vcov = "HC", stars = TRUE, 
+                        statistic = c("se = {std.error}", "p = {p.value}"))
+
+```
+
+#Dataframes
+```{r}
+df <- df %>% select(famid, dyad_part, 
+                    nonf_asym_total, nonf_sym_total, nonf_null_total, 
+                    dyad_nonf_sym, dyad_nonf_asym, dyad_nonf_null, 
+                    malf_asym_total, malf_sym_total, malf_null_total, 
+                    dyad_malf_sym, dyad_malf_asym, dyad_malf_null, 
+                    uplift_asym_total, uplift_sym_total, uplift_null_total,
+                    dyad_uplift_sym, dyad_uplift_asym, dyad_uplift_null,
+                    cesd_mean, pac_mean, ptg_mean, ies_mean, sf12_physical, sf12_mental,
+                    burden_mean, marstat, empstat, age, hhinc, race, educate, cr_age)
+
+df_add <- termeh_df %>% select(famid, dyad_part, unique_nonf, unique_malf, unique_uplift, network.size_duo)
+
+fin <- merge(df, df_add, by = c("famid", "dyad_part"))
+fin <- fin %>% unique()
+```
+
+#Nonfeasance
+```{r}
+coef_df <- fin %>% select(-c(marstat, empstat, age, hhinc, race, educate, cr_age, famid, dyad_part))
+corrplot::corrplot(cor(coef_df, use = "complete.obs"),
+                   method = "color",
+                   type = "upper")
+
+#CESD
+CESD_Dyad <- lm(cesd_mean ~ dyad_nonf_sym + dyad_nonf_asym + dyad_nonf_null + unique_nonf + network.size_duo, fin)
+CESD_Dyad <- msummary(CESD_Dyad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+CESD_triad <- lm(cesd_mean ~ nonf_sym_total + nonf_asym_total + nonf_null_total + unique_nonf + network.size_duo, fin)
+CESD_triad <- msummary(CESD_triad, vcov = "HC", stars = TRUE, 
+                        statistic = c("se = {std.error}", "p = {p.value}"))
+
+#pac
+pac_Dyad <- lm(pac_mean ~ dyad_nonf_sym + dyad_nonf_asym + dyad_nonf_null + unique_nonf + network.size_duo, fin)
+pac_Dyad <- msummary(pac_Dyad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+
+pac_triad <- lm(pac_mean ~ nonf_sym_total + nonf_asym_total + nonf_null_total + unique_nonf + network.size_duo, fin)
+pac_triad <- msummary(pac_triad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+#ptg
+ptg_Dyad <- lm(ptg_mean ~ dyad_nonf_sym + dyad_nonf_asym + dyad_nonf_null + unique_nonf + network.size_duo, fin)
+ptg_Dyad <- msummary(ptg_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+ptg_triad <- lm(ptg_mean ~ nonf_sym_total + nonf_asym_total + nonf_null_total + unique_nonf + network.size_duo, fin)
+ptg_triad <- msummary(ptg_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+#sf12_mental
+sf12_mental_Dyad <- lm(sf12_mental ~ dyad_nonf_sym + dyad_nonf_asym + dyad_nonf_null + unique_nonf + network.size_duo, fin)
+sf12_mental_Dyad <- msummary(sf12_mental_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+sf12_mental_triad <- lm(sf12_mental ~ nonf_sym_total + nonf_asym_total + nonf_null_total + unique_nonf + network.size_duo, fin)
+sf12_mental_triad <- msummary(sf12_mental_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+#sf12_physical
+sf12_physical_Dyad <- lm(sf12_physical ~ dyad_nonf_sym + dyad_nonf_asym + dyad_nonf_null + unique_nonf + network.size_duo, fin)
+sf12_physical_Dyad <- msummary(sf12_physical_Dyad, vcov = "HC", stars = TRUE, 
+                             statistic = c("se = {std.error}", "p = {p.value}"))
+
+sf12_physical_triad <- lm(sf12_physical ~ nonf_sym_total + nonf_asym_total + nonf_null_total + unique_nonf + network.size_duo, fin)
+sf12_physical_triad <- msummary(sf12_physical_triad, vcov = "HC", stars = TRUE, 
+                              statistic = c("se = {std.error}", "p = {p.value}"))
+
+#ies
+ies_Dyad <- lm(ies_mean ~ dyad_nonf_sym + dyad_nonf_asym + dyad_nonf_null + unique_nonf + network.size_duo, fin)
+ies_Dyad <- msummary(ies_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+ies_triad <- lm(ies_mean ~ nonf_sym_total + nonf_asym_total + nonf_null_total + unique_nonf + network.size_duo, fin)
+ies_triad <- msummary(ies_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+```
+
+#Quick Descriptives
+```{r}
+triad_census$malf_mutual <- ifelse(triad_census$malf_Father == 1 & triad_census$malf_Mother == 1, 1, 0)
+table(triad_census$malf_mutual)
+
+triad_census$nonf_mutual <- ifelse(triad_census$nonf_Father == 1 & triad_census$nonf_Mother == 1, 1, 0)
+table(triad_census$nonf_mutual)
+
+triad_census$uplift_mutual <- ifelse(triad_census$uplift_Father == 1 & triad_census$uplift_Mother == 1, 1, 0)
+table(triad_census$uplift_mutual)
+
+
+unique_df <- unique_df %>%
+  subset(up == 1)
+
+dyad_census$malf_mutual <- ifelse(dyad_census$malf_father == 1 & dyad_census$malf_mother == 1, 1, 0)
+table(dyad_census$malf_mutual)
+
+dyad_census$nonf_mutual <- ifelse(dyad_census$nonf_father == 1 & dyad_census$nonf_mother == 1, 1, 0)
+table(dyad_census$nonf_mutual)
+
+
+```
+
+#Malfeasance
+```{r}
+#CESD
+CESD_Dyad <- lm(cesd_mean ~ dyad_malf_sym + dyad_malf_asym + dyad_malf_null + unique_malf + network.size_duo, fin)
+CESD_Dyad <- msummary(CESD_Dyad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+
+CESD_triad <- lm(cesd_mean ~ malf_sym_total + malf_asym_total + malf_null_total + unique_malf + network.size_duo, fin)
+CESD_triad <- msummary(CESD_triad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+#pac
+pac_Dyad <- lm(pac_mean ~ dyad_malf_sym + dyad_malf_asym + dyad_malf_null + unique_malf + network.size_duo, fin)
+pac_Dyad <- msummary(pac_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+pac_triad <- lm(pac_mean ~ malf_sym_total + malf_asym_total + malf_null_total + unique_malf + network.size_duo, fin)
+pac_triad <- msummary(pac_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+#ptg
+ptg_Dyad <- lm(ptg_mean ~ dyad_malf_sym + dyad_malf_asym + dyad_malf_null + unique_malf + network.size_duo, fin)
+ptg_Dyad <- msummary(ptg_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+ptg_triad <- lm(ptg_mean ~ malf_sym_total + malf_asym_total + malf_null_total + unique_malf + network.size_duo, fin)
+ptg_triad <- msummary(ptg_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+#sf12_mental
+sf12_mental_Dyad <- lm(sf12_mental ~ dyad_malf_sym + dyad_malf_asym + dyad_malf_null + unique_malf + network.size_duo, fin)
+sf12_mental_Dyad <- msummary(sf12_mental_Dyad, vcov = "HC", stars = TRUE, 
+                             statistic = c("se = {std.error}", "p = {p.value}"))
+
+sf12_mental_triad <- lm(sf12_mental ~ malf_sym_total + malf_asym_total + malf_null_total + unique_malf + network.size_duo, fin)
+sf12_mental_triad <- msummary(sf12_mental_triad, vcov = "HC", stars = TRUE, 
+                              statistic = c("se = {std.error}", "p = {p.value}"))
+#sf12_physical
+sf12_physical_Dyad <- lm(sf12_physical ~ dyad_malf_sym + dyad_malf_asym + dyad_malf_null + unique_malf + network.size_duo, fin)
+sf12_physical_Dyad <- msummary(sf12_physical_Dyad, vcov = "HC", stars = TRUE, 
+                               statistic = c("se = {std.error}", "p = {p.value}"))
+
+sf12_physical_triad <- lm(sf12_physical ~ malf_sym_total + malf_asym_total + malf_null_total + unique_malf + network.size_duo, fin)
+sf12_physical_triad <- msummary(sf12_physical_triad, vcov = "HC", stars = TRUE, 
+                                statistic = c("se = {std.error}", "p = {p.value}"))
+
+#ies
+ies_Dyad <- lm(ies_mean ~ dyad_malf_sym + dyad_malf_asym + dyad_malf_null + unique_malf + network.size_duo, fin)
+ies_Dyad <- msummary(ies_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+ies_triad <- lm(ies_mean ~ malf_sym_total + malf_asym_total + malf_null_total + unique_malf + network.size_duo, fin)
+ies_triad <- msummary(ies_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+```
+
+#Uplift
+```{r}
+#CESD
+CESD_Dyad <- lm(cesd_mean ~ dyad_uplift_sym + dyad_uplift_asym + dyad_uplift_null + unique_uplift + network.size_duo, fin)
+CESD_Dyad <- msummary(CESD_Dyad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+
+CESD_triad <- lm(cesd_mean ~ uplift_sym_total + uplift_asym_total + uplift_null_total + unique_uplift + network.size_duo, fin)
+CESD_triad <- msummary(CESD_triad, vcov = "HC", stars = TRUE, 
+                       statistic = c("se = {std.error}", "p = {p.value}"))
+
+#pac
+pac_Dyad <- lm(pac_mean ~ dyad_uplift_sym + dyad_uplift_asym + dyad_uplift_null + unique_uplift + network.size_duo, fin)
+pac_Dyad <- msummary(pac_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+pac_triad <- lm(pac_mean ~ uplift_sym_total + uplift_asym_total + uplift_null_total + unique_uplift + network.size_duo, fin)
+pac_triad <- msummary(pac_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+#ptg
+ptg_Dyad <- lm(ptg_mean ~ dyad_uplift_sym + dyad_uplift_asym + dyad_uplift_null + unique_uplift + network.size_duo, fin)
+ptg_Dyad <- msummary(ptg_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+ptg_triad <- lm(ptg_mean ~ uplift_sym_total + uplift_asym_total + uplift_null_total + unique_uplift + network.size_duo, fin)
+ptg_triad <- msummary(ptg_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+#sf12_mental
+sf12_mental_Dyad <- lm(sf12_mental ~ dyad_uplift_sym + dyad_uplift_asym + dyad_uplift_null + unique_uplift + network.size_duo, fin)
+sf12_mental_Dyad <- msummary(sf12_mental_Dyad, vcov = "HC", stars = TRUE, 
+                             statistic = c("se = {std.error}", "p = {p.value}"))
+
+sf12_mental_triad <- lm(sf12_mental ~ uplift_sym_total + uplift_asym_total + uplift_null_total + unique_uplift + network.size_duo, fin)
+sf12_mental_triad <- msummary(sf12_mental_triad, vcov = "HC", stars = TRUE, 
+                              statistic = c("se = {std.error}", "p = {p.value}"))
+#sf12_physical
+sf12_physical_Dyad <- lm(sf12_physical ~ dyad_uplift_sym + dyad_uplift_asym + dyad_uplift_null + unique_uplift + network.size_duo, fin)
+sf12_physical_Dyad <- msummary(sf12_physical_Dyad, vcov = "HC", stars = TRUE, 
+                               statistic = c("se = {std.error}", "p = {p.value}"))
+
+sf12_physical_triad <- lm(sf12_physical ~ uplift_sym_total + uplift_asym_total + uplift_null_total + unique_uplift + network.size_duo, fin)
+sf12_physical_triad <- msummary(sf12_physical_triad, vcov = "HC", stars = TRUE, 
+                                statistic = c("se = {std.error}", "p = {p.value}"))
+
+#ies
+ies_Dyad <- lm(ies_mean ~ dyad_uplift_sym + dyad_uplift_asym + dyad_uplift_null + unique_uplift + network.size_duo, fin)
+ies_Dyad <- msummary(ies_Dyad, vcov = "HC", stars = TRUE, 
+                     statistic = c("se = {std.error}", "p = {p.value}"))
+
+ies_triad <- lm(ies_mean ~ uplift_sym_total + uplift_asym_total + uplift_null_total + unique_uplift + network.size_duo, fin)
+ies_triad <- msummary(ies_triad, vcov = "HC", stars = TRUE, 
+                      statistic = c("se = {std.error}", "p = {p.value}"))
+```
+
+#Additional Request
+```{r}
+unique_df <- unique_df %>% select(famid, StudyID, dyad_part, malf_tot, nonf_tot, uplift_tot) %>% unique()
+fin_add <- fin %>% 
+  select(famid, dyad_part, sf12_mental, sf12_physical, 
+         cesd_mean, ies_mean, ptg_mean, pac_mean, burden_mean,
+         network.size_duo)
+fin2 <- merge(unique_df, fin_add, by = c("famid", "dyad_part"))
+
+colnames(fin2)[2] <- "gender"
+
+#base models
+base <- lm(cbind(sf12_mental, cesd_mean, ies_mean, ptg_mean, pac_mean) ~  burden_mean, fin2)
+base_mod <- coeftest(base, vcovHC(base, type = "HC0"))
+
+
+#unstructured interpersonal strain
+model1.a <- lm(cbind(sf12_mental, cesd_mean, ies_mean, ptg_mean, pac_mean) ~ malf_tot +
+                 gender + burden_mean + network.size_duo, fin2)
+model1.a_mod <- coeftest(model1.a, vcovHC(model1.a, type = "HC0"))
+
+model1.b <- lm(cbind(sf12_mental, cesd_mean, ies_mean, ptg_mean, pac_mean) ~ nonf_tot +
+                 gender + burden_mean + network.size_duo, fin2)
+model1.b_mod <- coeftest(model1.b, vcovHC(model1.b, type = "HC0"))
+
+#unstructured interpersonal strain
+model1.c <- lm(cbind(sf12_mental, cesd_mean, ies_mean, ptg_mean, pac_mean) ~ uplift_tot +
+                 gender + burden_mean + network.size_duo, fin2)
+model1.c_mod <- coeftest(model1.c, vcovHC(model1.c, type = "HC0"))
+
+#Unstructured Stress Process: Burden to Interpersonal Strain 
+model3 <- lm(cbind(malf_tot, nonf_tot) ~ burden_mean*uplift_tot + gender + network.size_duo, fin2)
+model3_mod <- coeftest(model3, vcovHC(model3, type = "HC0"))
+
+#Unstructured Stress Process: Interpersonal Strain to Caregiver Well-being 
+model4.a <- lm(cbind(sf12_mental, cesd_mean, ies_mean, ptg_mean, pac_mean) ~ malf_tot*uplift_tot +
+                 gender + burden_mean + network.size_duo, fin2)
+model4.a_mod <- coeftest(model4.a, vcovHC(model4.a, type = "HC0"))
+
+model4.b <- lm(cbind(sf12_mental, cesd_mean, ies_mean, ptg_mean, pac_mean) ~ nonf_tot*uplift_tot +
+                 gender + burden_mean + network.size_duo, fin2)
+model4.b_mod <- coeftest(model4.b, vcovHC(model4.b, type = "HC0"))
+```
+
